@@ -273,38 +273,9 @@ def get_model():
     if (model is not None):
         logger.debug("Setting CIME_MODEL={} from environment".format(model))
     else:
-        cime_config = get_cime_config()
-        if (cime_config.has_option('main','CIME_MODEL')):
-            model = cime_config.get('main','CIME_MODEL')
-            if model is not None:
-                logger.debug("Setting CIME_MODEL={} from ~/.cime/config".format(model))
-
-    # One last try
-    if (model is None):
-        srcroot = None
-        if cime_config.has_section('main') and cime_config.has_option('main', 'SRCROOT'):
-            srcroot = cime_config.get('main','SRCROOT')
-        if srcroot is None:
-            srcroot = os.path.dirname(os.path.abspath(get_cime_root()))
-        if os.path.isfile(os.path.join(srcroot, "SVN_EXTERNAL_DIRECTORIES")) \
-           or os.path.isdir(os.path.join(srcroot, "manage_externals")):
-            model = 'cesm'
-        else:
-            model = 'e3sm'
-        # This message interfers with the correct operation of xmlquery
-        # logger.debug("Guessing CIME_MODEL={}, set environment variable if this is incorrect".format(model))
-
-    if model is not None:
-        set_model(model)
-        return model
-
-    modelroot = os.path.join(get_cime_root(), "config")
-    models = os.listdir(modelroot)
-    msg = ".cime/config or environment variable CIME_MODEL must be set to one of: "
-    msg += ", ".join([model for model in models
-                      if os.path.isdir(os.path.join(modelroot,model))
-                      and model != "xml_schemas"])
-    expect(False, msg)
+        model = 'cesm'
+    set_model(model)
+    return model
 
 def _get_path(filearg, from_dir):
     if not filearg.startswith("/") and from_dir is not None:
