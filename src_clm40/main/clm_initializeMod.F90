@@ -13,12 +13,15 @@ module clm_initializeMod
   use spmdMod         , only : masterproc
   use shr_sys_mod     , only : shr_sys_flush
   use abortutils      , only : endrun
-  use clm_varctl      , only : nsrest, nsrStartup, nsrContinue, nsrBranch, &
-                               create_glacier_mec_landunit, iulog, &
-                               use_cn, use_cndv
-  use clm_varsur      , only : wtxy, vegxy, topoxy
+  use clm_varctl      , only : nsrest, nsrStartup, nsrContinue, nsrBranch, downscale
+  use clm_varctl      , only : iulog
+  use clm_varctl      , only : create_glacier_mec_landunit
+  use clm_varsur      , only : wtxy,vegxy
+  use clm_varsur      , only : topoxy
+  use clmtype         , only : gratm, grlnd, nameg, namel, namec, namep, allrof
   use perf_mod        , only : t_startf, t_stopf
-  use ncdio_pio       , only : file_desc_t
+  use ncdio_pio
+  use mct_mod
 
 ! !PUBLIC TYPES:
   implicit none
@@ -37,6 +40,7 @@ module clm_initializeMod
 ! !PRIVATE MEMBER FUNCTIONS:
   private header         ! echo version numbers
   private do_restread    ! read a restart file
+  private cellarea       ! area of grid cells (square km)
 !-----------------------------------------------------------------------
 ! !PRIVATE DATA MEMBERS: None
 
@@ -67,21 +71,24 @@ contains
 ! o Initializes accumulation variables.
 !
 ! !USES:
-    use clmtypeInitMod  , only : initClmtype
-    use clm_varpar      , only : maxpatch, clm_varpar_init
-    use clm_varctl      , only : fsurdat, fatmlndfrc, flndtopo, fglcmask, noland 
-    use pftvarcon       , only : pftconrd
-    use decompInitMod   , only : decompInit_lnd, decompInit_glcp
-    use decompMod       , only : get_proc_bounds
-    use domainMod       , only : domain_check, ldomain, domain_init
-    use surfrdMod       , only : surfrd_get_globmask, surfrd_get_grid, surfrd_get_topo, &
-                                 surfrd_get_data 
-    use controlMod      , only : control_init, control_print, nlfilename
-    use UrbanInputMod   , only : UrbanInput
-    use ncdio_pio       , only : ncd_pio_init
-    use clm_atmlnd      , only : init_atm2lnd_type, init_lnd2atm_type, clm_a2l, clm_l2a
-    use clm_glclnd      , only : init_glc2lnd_type, init_lnd2glc_type, clm_x2s, clm_s2x
-    use initGridCellsMod, only : initGridCells
+    use clm_varpar   , only : lsmlon, lsmlat, maxpatch, clm_varpar_init
+    use pftvarcon    , only : pftconrd
+    use decompInitMod, only : decompInit_atm, decompInit_lnd, decompInit_glcp
+    use decompMod    , only : adecomp,ldecomp
+    use decompMod    , only : get_proc_clumps, get_clump_bounds, &
+                              get_proc_bounds, get_proc_bounds_atm
+    use domainMod    , only : domain_check
+    use domainMod    , only : adomain,ldomain
+    use domainMod    , only : alatlon,llatlon,gatm,amask,pftm
+    use domainMod    , only : latlon_check, latlon_setsame
+    use surfrdMod    , only : surfrd,surfrd_get_grid,surfrd_get_frac,&
+                              surfrd_get_topo, surfrd_get_latlon
+    use clm_varctl   , only : fsurdat, fatmgrid, fatmlndfrc, &
+                              fatmtopo, flndtopo, noland, downscale, fglcmask
+    use controlMod   , only : control_init, control_print, nlfilename
+    use UrbanInputMod, only : UrbanInput
+    use ncdio_pio    , only : ncd_pio_init
+    use downscaleMod , only : map_setgatmfm
 !
 ! !ARGUMENTS:
 !
@@ -92,24 +99,19 @@ contains
 ! !LOCAL VARIABLES:
 !EOP
     integer  :: ier                   ! error status
-    integer  :: i,j,n,k               ! loop indices
-    integer  :: nl                    ! gdc and glo lnd indices
-    integer  :: ns, ni, nj            ! global grid sizes
-    logical  :: isgrid2d              ! true => global grid is regular lat/lon
-    integer  :: begp, endp            ! clump beg and ending pft indices
-    integer  :: begc, endc            ! clump beg and ending column indices
-    integer  :: begl, endl            ! clump beg and ending landunit indices
+    integer  :: i,j,n1,n2,n,k,nr      ! loop indices
+    integer  :: nl,nlg                ! gdc and glo lnd indices
+    real(r8) :: rmaxlon,rmaxlat       ! local min/max vars
     integer  :: begg, endg            ! clump beg and ending gridcell indices
-    integer ,pointer  :: amask(:)     ! global land mask
+    integer  :: begg_atm, endg_atm    ! proc beg and ending gridcell indices
     character(len=32) :: subname = 'initialize1' ! subroutine name
 !-----------------------------------------------------------------------
-
-    call t_startf('clm_init1')
 
     ! ------------------------------------------------------------------------
     ! Initialize run control variables, timestep
     ! ------------------------------------------------------------------------
 
+    call t_startf('init_control')
     call header()
 
     if (masterproc) then
@@ -118,23 +120,80 @@ contains
        call shr_sys_flush(iulog)
     endif
 
-    call control_init()
     call clm_varpar_init()
-    call ncd_pio_init()
+    call control_init( )
+    call ncd_pio_init( )
 
     if (masterproc) call control_print()
 
+    call t_stopf('init_control')
+    call t_startf('init_grids')
+
     ! ------------------------------------------------------------------------
-    ! Read in global land grid and land mask (amask)- needed to set decomposition
+    ! Read atm and land grids - global reads of data
     ! ------------------------------------------------------------------------
 
-    ! global memory for amask is allocate in surfrd_get_glomask - must be
-    ! deallocated below
     if (masterproc) then
-       write(iulog,*) 'Attempting to read global land mask from ',trim(fatmlndfrc)
+       write(iulog,*) 'Attempting to read alatlon from fatmgrid'
        call shr_sys_flush(iulog)
     endif
-    call surfrd_get_globmask(filename=fatmlndfrc, mask=amask, ni=ni, nj=nj)
+
+    call surfrd_get_latlon(alatlon, fatmgrid, amask, fatmlndfrc)
+    call latlon_check(alatlon)
+    if (masterproc) then
+       write(iulog,*) 'amask size/min/max ',size(amask),minval(amask),maxval(amask)
+       call shr_sys_flush(iulog)
+    endif
+
+    if (masterproc) then
+       write(iulog,*) 'Attempting to read llatlon from fsurdat'
+       call shr_sys_flush(iulog)
+    endif
+
+    call surfrd_get_latlon(llatlon, fsurdat, pftm, pftmflag=.true.)
+    call latlon_check(llatlon)
+
+    lsmlon = llatlon%ni
+    lsmlat = llatlon%nj
+
+    if (llatlon%ni < alatlon%ni .or. llatlon%nj < alatlon%nj) then
+       if (masterproc) write(iulog,*) 'ERROR llatlon size > alatlon size: ', &
+          n,llatlon%ni, llatlon%nj, alatlon%ni, alatlon%nj
+       call endrun( trim(subname)//'ERROR: bad sizes' )
+    endif
+
+    !--- check if grids are "close", adjust, continue, or end  ---
+    !--- set llatlon== alatlon if lats/lons < 0.001 different ---
+    !--- exit if lats/lon > 0.001 and < 1.0 different          ---
+    !--- continue if lat/lons > 1.0 different                  ---
+
+    downscale = .true.
+    if (alatlon%ni == llatlon%ni .and. alatlon%nj == llatlon%nj) then
+       rmaxlon = 0.0_r8
+       rmaxlat = 0.0_r8
+       do n = 1,alatlon%ni
+          rmaxlon = max(rmaxlon,abs(alatlon%lonc(n)-llatlon%lonc(n)))
+       enddo
+       do n = 1,alatlon%nj
+          rmaxlat = max(rmaxlat,abs(alatlon%latc(n)-llatlon%latc(n)))
+       enddo
+       if (rmaxlon < 0.001_r8 .and. rmaxlat < 0.001_r8) then
+          if (masterproc) write(iulog,*) trim(subname)//': set llatlon =~ alatlon', &
+             ':continue',rmaxlon,rmaxlat
+          call latlon_setsame(alatlon,llatlon)
+          downscale = .false.
+       elseif (rmaxlon < 1.0_r8 .and. rmaxlat < 1.0_r8) then
+          if (masterproc) write(iulog,*) trim(subname)//': alatlon/llatlon mismatch', &
+             ':error',rmaxlon,rmaxlat
+          call endrun( trim(subname) )
+       else
+          if (masterproc) write(iulog,*) trim(subname)//': alatlon/llatlon different', &
+              ':continue',rmaxlon,rmaxlat
+       endif
+    else
+       if (masterproc) write(iulog,*) trim(subname)//': alatlon/llatlon different ', &
+          'sizes:continue'
+    endif
 
     ! Exit early if no valid land points
     if ( all(amask == 0) )then
@@ -143,95 +202,197 @@ contains
        return
     end if
 
-    ! Determine clm decomposition
+    ! ------------------------------------------------------------------------
+    ! Initialize clump and processor decomposition
+    ! ------------------------------------------------------------------------
 
-    call decompInit_lnd(ni, nj, amask)
-    deallocate(amask)
+    call decompInit_atm(alatlon,amask)
 
-    ! Get grid and land fraction (set ldomain)
+    if (downscale) then
+       call map_setgatmfm(gatm,alatlon,llatlon,amask,pftm)
+    else
+       nlg = alatlon%ns
+       allocate(gatm(nlg))
+       gatm(:) = -1
+       do n = 1,nlg
+          if (amask(n) /= 0) then
+             gatm(n)=n
+          end if
+       end do
+    end if
+
+    call decompInit_lnd(alatlon%ns, alatlon%ni, alatlon%nj, &
+                        llatlon%ns, llatlon%ni, llatlon%nj)
+
+    ! ------------------------------------------------------------------------
+    ! Determine atm and lnd domains and surface properties
+    ! ------------------------------------------------------------------------
+
+    !--- Read atm grid -----------------------------------------------------
+
+    call get_proc_bounds_atm(begg_atm, endg_atm)
 
     if (masterproc) then
-       write(iulog,*) 'Attempting to read ldomain from ',trim(fatmlndfrc)
+       write(iulog,*) 'Attempting to read adomain from fatmgrid'
        call shr_sys_flush(iulog)
     endif
-    if (create_glacier_mec_landunit) then
-       call surfrd_get_grid(ldomain, fatmlndfrc, fglcmask)
-    else
-       call surfrd_get_grid(ldomain, fatmlndfrc)
-    endif
-    if (masterproc) then
-       call domain_check(ldomain)
-    endif
-    ldomain%mask = 1  !!! TODO - is this needed?
+    call surfrd_get_grid(adomain, fatmgrid, begg_atm, endg_atm, gratm)
 
-    ! Get topo if appropriate (set ldomain%topo)
+    if (masterproc) then
+       write(iulog,*) 'Attempting to read atm landfrac from fatmlndfrc'
+       call shr_sys_flush(iulog)
+    endif
+
+    if (create_glacier_mec_landunit) then
+       call surfrd_get_frac(adomain, fatmlndfrc, fglcmask)
+
+       ! Make sure the glc mask is a subset of the land mask
+       do n = begg_atm, endg_atm
+          if (adomain%glcmask(n)==1 .and. adomain%mask(n)==0) then
+             write(iulog,*) 'landmask/glcmask mismatch'
+             write(iulog,*) 'glc requires input where landmask = 0, gridcell index', n
+             call shr_sys_flush(iulog)
+             call endrun( trim(subname)//'ERROR: clm and land-ice masks are mismatched' )
+          endif
+       enddo
+    else
+       call surfrd_get_frac(adomain, fatmlndfrc)
+    endif
+
+    if (fatmtopo /= " ") then
+       if (masterproc) then
+          write(iulog,*) 'Attempting to read atm topo from fatmtopo'
+          call shr_sys_flush(iulog)
+       endif
+       call surfrd_get_topo(adomain, fatmtopo)
+    endif
+
+    !--- compute area
+    if (.not. adomain%areaset) then
+       do nr = begg_atm,endg_atm
+          n = adecomp%gdc2glo(nr)
+          i = mod(n-1,adomain%ni) + 1
+          j = (n-1)/adomain%ni + 1
+          adomain%area(nr) = cellarea(alatlon,i,j)
+       enddo
+       adomain%areaset = .true.
+    endif
+
+    if (masterproc) then
+       write(iulog,*) 'adomain status:'
+       call domain_check(adomain)
+    endif
+
+    !--- Read lnd grid -----------------------------------------------------
+
+    call get_proc_bounds(begg, endg)
+
+    if (masterproc) then
+       write(iulog,*) 'Attempting to read ldomain from fsurdat ',trim(fsurdat)
+       call shr_sys_flush(iulog)
+    endif
+    ! Note this sets ldomain%pftm
+    call surfrd_get_grid(ldomain, fsurdat, begg, endg, grlnd)
 
     if (flndtopo /= " ") then
        if (masterproc) then
-          write(iulog,*) 'Attempting to read atm topo from ',trim(flndtopo)
+          write(iulog,*) 'Attempting to read lnd topo from flndtopo ',trim(flndtopo)
           call shr_sys_flush(iulog)
        endif
-       call surfrd_get_topo(ldomain, flndtopo)  
+       ! The following sets ldomain%topo
+       call surfrd_get_topo(ldomain, flndtopo)
     endif
 
+    !--- compute area
+    if (.not. ldomain%areaset) then
+       do nr = begg,endg
+          n = ldecomp%gdc2glo(nr)
+          i = mod(n-1,ldomain%ni) + 1
+          j = (n-1)/ldomain%ni + 1
+          ldomain%area(nr) = cellarea(alatlon,i,j)
+       enddo
+       ldomain%areaset = .true.
+    endif
+
+    if (masterproc) then
+       call domain_check(ldomain)
+    endif
+
+    !--- overwrite ldomain if same grids -----------------------------------
+
+    if (.not. downscale) then
+       if (masterproc) write(iulog,*) trim(subname)//': downscale false, set ldomain =~ adomain'
+       ! Don't copy [pftm, topo, mask, frac, nara, ntop]
+       ! ldomain%pftm is set above in call to surfrd_get_grid
+       ! ldomain%topo is set above in call to surfrd_get_topo
+       ! ldomain%mask, ldomain%frac, ldomain%nara and ndomain%ntop are set in initialize2 
+
+       ldomain%latc     = adomain%latc
+       ldomain%lonc     = adomain%lonc
+       ldomain%area     = adomain%area
+       ldomain%set      = adomain%set
+       ldomain%areaset  = adomain%areaset 
+       ldomain%regional = adomain%regional
+       ldomain%decomped = adomain%decomped
+       ldomain%glcmask  = adomain%glcmask
+    endif
+
+    ! --------------------------------------------------------------------
     ! Initialize urban model input (initialize urbinp data structure)
+    ! --------------------------------------------------------------------
 
     call UrbanInput(mode='initialize')
 
     ! Allocate surface grid dynamic memory (for wtxy and vegxy arrays)
-    ! Allocate additional dynamic memory for glacier_mec topo and thickness
 
-    call get_proc_bounds(begg, endg)
-    allocate (vegxy(begg:endg,maxpatch), wtxy(begg:endg,maxpatch), stat=ier)   
-    if (create_glacier_mec_landunit) then
-       allocate (topoxy(begg:endg,maxpatch), stat=ier)
-    else
-       allocate (topoxy(1,1), stat=ier)
-    endif
+    call t_stopf('init_grids')
+    call t_startf('init_surdat')
+
+    call get_proc_bounds    (begg    , endg)
+    allocate (vegxy(begg:endg,maxpatch), &
+              wtxy(begg:endg,maxpatch),  &
+              stat=ier)   
     if (ier /= 0) then
        write(iulog,*)'initialize allocation error'; call endrun()
     endif
 
+    ! Allocate additional dynamic memory for glacier_mec topo and thickness
+
+    if (create_glacier_mec_landunit) then
+       allocate (topoxy(begg:endg,maxpatch), stat=ier)
+       if (ier /= 0) then
+          write(iulog,*)'initialize allocation error'; call endrun()
+       endif
+    else
+       allocate (topoxy(1,1), stat=ier)
+       if (ier /= 0) then
+          write(iulog,*)'initialize allocation error'; call endrun()
+       endif
+    endif
+
+    ! --------------------------------------------------------------------
     ! Read list of PFTs and their corresponding parameter values
-    ! Independent of model resolution, Needs to stay before surfrd_get_data
+    ! Independent of model resolution
+    ! Needs to stay before call surfrd
+    ! --------------------------------------------------------------------
 
     call pftconrd()
 
     ! Read surface dataset and set up vegetation type [vegxy] and 
     ! weight [wtxy] arrays for [maxpatch] subgrid patches.
     
-    call surfrd_get_data(ldomain, fsurdat)
-
-    ! Determine decomposition of subgrid scale landunits, columns, pfts
+    call surfrd (fsurdat, ldomain)
 
     if (create_glacier_mec_landunit) then
-       call decompInit_glcp (ns, ni, nj, ldomain%glcmask)
+       call decompInit_glcp (alatlon%ns,   alatlon%ni,   alatlon%nj, &
+                             llatlon%ns,   llatlon%ni,   llatlon%nj, &
+                             ldomain%glcmask)
     else
-       call decompInit_glcp (ns, ni, nj)
+       call decompInit_glcp (alatlon%ns, alatlon%ni, alatlon%nj, &
+                             llatlon%ns, llatlon%ni, llatlon%nj)
     endif
 
-    ! Allocate memory and initialize values of clmtype data structures
-
-    call initClmtype()
-
-    ! Initialize atm->lnd, lnd->atm, glc->lnd and lnd->glc data structures
-
-    call init_atm2lnd_type(begg, endg, clm_a2l)
-    call init_lnd2atm_type(begg, endg, clm_l2a)
-    if (create_glacier_mec_landunit) then
-       call init_glc2lnd_type(begg, endg, clm_x2s)
-       call init_lnd2glc_type(begg, endg, clm_s2x)
-    endif
-
-    ! Build hierarchy and topological info for derived types
-
-    call initGridCells()
-
-    ! Deallocate surface grid dynamic memory (for wtxy and vegxy arrays)
-
-    deallocate (vegxy, wtxy, topoxy)
-
-    call t_stopf('clm_init1')
+    call t_stopf('init_surdat')
 
   end subroutine initialize1
 
@@ -258,25 +419,44 @@ contains
 ! o Initializes accumulation variables.
 !
 ! !USES:
-    use clm_atmlnd      , only : clm_map2gcell_minimal
-    use clm_glclnd      , only : update_clm_s2x
-    use clm_varctl      , only : finidat, flanduse_timeseries
-    use decompMod       , only : get_proc_clumps, get_proc_bounds
+    use clm_atmlnd      , only : init_atm2lnd_type, init_lnd2atm_type, &
+                                 clm_a2l, clm_l2a, atm_a2l, atm_l2a, &
+	                         init_adiag_type
+    use initGridCellsMod, only : initGridCells
+    use clm_varctl      , only : finidat, fpftdyn
+    use clmtypeInitMod  , only : initClmtype
+    use domainMod       , only : gatm, ldomain, adomain, llatlon, alatlon
+    use decompMod       , only : adecomp,ldecomp, &
+                                 get_proc_clumps, get_clump_bounds, &
+                                 get_proc_bounds, get_proc_bounds_atm
+    use downscaleMod    , only : map_setmapsFM, map1dl_a2l, map1dl_l2a
     use filterMod       , only : allocFilters, setFilters
     use histFldsMod     , only : hist_initFlds
-    use histFileMod     , only : hist_htapes_build, htapes_fieldlist
+    use histFileMod     , only : hist_htapes_build
     use restFileMod     , only : restFile_getfile, &
                                  restFile_open, restFile_close, restFile_read 
     use accFldsMod      , only : initAccFlds, initAccClmtype
     use mkarbinitMod    , only : mkarbinit
     use pftdynMod       , only : pftdyn_init, pftdyn_interp
+#ifdef CN
     use ndepStreamMod    , only : ndep_init, ndep_interp
     use CNEcosystemDynMod, only : CNEcosystemDynInit
+#endif
+#if (defined CNDV)
     use pftdynMod             , only : pftwt_init
     use CNDVEcosystemDyniniMod, only : CNDVEcosystemDynini
+#endif
     use STATICEcosysDynMod , only : EcosystemDynini, readAnnualVegetation
     use STATICEcosysDynMod , only : interpMonthlyVeg
     use DustMod         , only : Dustini
+#if (defined CASA)
+    use CASAMod         , only : initCASA
+    use CASAPhenologyMod, only : initCASAPhenology
+    use CASAiniTimeVarMod,only : CASAiniTimeVar
+#endif
+#if (defined RTM) 
+    use RtmMod          , only : Rtmini
+#endif
     use clm_time_manager, only : get_curr_date, get_nstep, advance_timestep, &
                                  timemgr_init, timemgr_restart_io, timemgr_restart
     use clm_time_manager, only : get_step_size, get_curr_calday
@@ -284,12 +464,13 @@ contains
     use UrbanMod        , only : UrbanClumpInit
     use UrbanInitMod    , only : UrbanInitTimeConst, UrbanInitTimeVar, UrbanInitAero 
     use UrbanInputMod   , only : UrbanInput
+    use clm_glclnd      , only : init_glc2lnd_type, init_lnd2glc_type, &
+                                 clm_x2s, clm_s2x, atm_x2s, atm_s2x
     use seq_drydep_mod  , only : n_drydep, drydep_method, DD_XLND
     use shr_orb_mod        , only : shr_orb_decl
     use initSurfAlbMod     , only : initSurfAlb, do_initsurfalb 
+    use clm_atmlnd         , only : clm_map2gcell
     use clm_varorb         , only : eccen, mvelpp, lambm0, obliqr
-    use VOCEmissionMod  , only : VOCEmission_init
-
 
 ! !Arguments    
     implicit none
@@ -300,8 +481,8 @@ contains
 !
 ! !LOCAL VARIABLES:
 !EOP
-    integer  :: nl,na,nag             ! indices
-    integer  :: i,j,k                 ! indices
+    integer  :: nl,nlg,na,nag         ! indices
+    integer  :: i,j,k,n1,n2           ! indices
     integer  :: yr                    ! current year (0, ...)
     integer  :: mon                   ! current month (1 -> 12)
     integer  :: day                   ! current day (1 -> 31)
@@ -312,6 +493,7 @@ contains
     integer  :: begc, endc            ! clump beg and ending column indices
     integer  :: begl, endl            ! clump beg and ending landunit indices
     integer  :: begg, endg            ! clump beg and ending gridcell indices
+    integer  :: begg_atm, endg_atm    ! proc beg and ending gridcell indices
     character(len=256) :: fnamer      ! name of netcdf restart file 
     character(len=256) :: pnamer      ! full pathname of netcdf restart file
     type(file_desc_t)  :: ncid        ! netcdf id
@@ -328,29 +510,112 @@ contains
     call t_startf('clm_init2')
 
     ! ------------------------------------------------------------------------
-    ! Initialize time constant variables 
+    ! Set the a2l and l2a maps
     ! ------------------------------------------------------------------------
 
-    call get_proc_bounds(begg, endg, begl, endl, begc, endc, begp, endp )
+    call get_proc_bounds(begg=begg,endg=endg)
+
+    if (downscale) then
+       call t_startf('init_mapsFM')
+       call map_setmapsFM(adomain, ldomain, gatm)
+       call t_stopf('init_mapsFM')
+       
+       ! Set ldomain mask and frac based on adomain and mapping.
+       ! Want ldomain%frac to match adomain%frac but scale by effective area.
+       ! so the implied area of an ldomain cell is the actual area * scaled frac 
+       ! which aggregated over all land cells under an atm cell,
+       ! will match the area associated with the atm cell.
+       
+       call get_proc_bounds_atm(begg=begg_atm,endg=endg_atm)
+       do nl = begg,endg
+          nlg = ldecomp%gdc2glo(nl)
+          nag = gatm(nlg)
+          if (nag <= 0) then
+             write(iulog,*) 'nag <= 0 ERROR ',nl,nlg,nag
+             call endrun( trim(subname)//'ERROR: no grid cells' )
+          endif
+          na = adecomp%glo2gdc(nag)
+          if (nlg < 1        .or. nlg > llatlon%ns .or. &
+              nag < 1        .or. nag > alatlon%ns .or. &
+              na  < begg_atm .or. na  > endg_atm) then
+             write(iulog,*) 'index ERROR ',&
+                  nl,nlg,nag,na,llatlon%ns,alatlon%ns,begg_atm,endg_atm
+             call endrun( trim(subname)//'ERROR: no grid cells' )
+          endif
+          ldomain%mask(nl) = 1
+          ldomain%frac(nl) = adomain%frac(na) * (ldomain%nara(nl)/ldomain%area(nl))
+       enddo
+    else
+       do nl = begg,endg
+          ldomain%mask(nl) = 1
+          ldomain%frac(nl) = adomain%frac(nl) 
+	  ldomain%nara(nl) = adomain%area(nl)
+	  ldomain%ntop(nl) = adomain%topo(nl)
+       end do
+    end if
+
+    ! ------------------------------------------------------------------------
+    ! Allocate memory and initialize values of clmtype data structures
+    ! ------------------------------------------------------------------------
+
+    call t_startf('init_clmtype')
+    call initClmtype()
+
+    call get_proc_bounds    (begg    , endg    , begl, endl, &
+                             begc    , endc    , begp, endp )
+    call init_atm2lnd_type  (begg    , endg    , clm_a2l)
+    call init_lnd2atm_type  (begg    , endg    , clm_l2a)
+
+    call get_proc_bounds_atm(begg_atm, endg_atm)
+    call init_atm2lnd_type  (begg_atm, endg_atm, atm_a2l)
+    call init_lnd2atm_type  (begg_atm, endg_atm, atm_l2a)
+
+    call init_adiag_type()
+
+    if (create_glacier_mec_landunit) then
+       call init_glc2lnd_type  (begg    , endg    , clm_x2s)
+       call init_lnd2glc_type  (begg    , endg    , clm_s2x)
+
+       call init_glc2lnd_type  (begg    , endg    , atm_x2s)
+       call init_lnd2glc_type  (begg    , endg    , atm_s2x)
+    endif
+
+    ! ------------------------------------------------------------------------
+    ! Build hierarchy and topological info for derived typees
+    ! ------------------------------------------------------------------------
+
+    call initGridCells()
+
+    ! Deallocate surface grid dynamic memory (for wtxy and vegxy arrays)
+
+    deallocate (vegxy, wtxy)
+    deallocate (topoxy)
+
+    call t_stopf('init_clmtype')
+
+    ! ------------------------------------------------------------------------
+    ! Initialize time constant variables 
+    ! ------------------------------------------------------------------------
 
     ! Initialize Ecosystem Dynamics 
 
     call t_startf('init_ecosys')
-    if (use_cndv) then
-       call CNDVEcosystemDynini()
-    else if (.not. use_cn) then
+#if (defined CNDV)
+    call CNDVEcosystemDynini()
+#elif (!defined CN)
+    call EcosystemDynini()
+#endif
+#if (defined CN) || (defined CNDV)
+
+    ! --------------------------------------------------------------
+    ! Initialize CLMSP ecosystem dynamics when drydeposition is used
+    ! so that estimates of monthly differences in LAI can be computed
+    ! --------------------------------------------------------------
+
+    if ( n_drydep > 0 .and. drydep_method == DD_XLND )then
        call EcosystemDynini()
     end if
-
-    if (use_cn .or. use_cndv) then
-       ! --------------------------------------------------------------
-       ! Initialize CLMSP ecosystem dynamics when drydeposition is used
-       ! so that estimates of monthly differences in LAI can be computed
-       ! --------------------------------------------------------------
-       if ( n_drydep > 0 .and. drydep_method == DD_XLND )then
-          call EcosystemDynini()
-       end if
-    end if
+#endif
     call t_stopf('init_ecosys')
 
     ! Initialize dust emissions model 
@@ -358,13 +623,10 @@ contains
     call t_startf('init_dust')
     call Dustini()
     call t_stopf('init_dust')
-    
-    ! Initialize MEGAN emissions model 
-
-    call VOCEmission_init( )
 
     ! ------------------------------------------------------------------------
     ! Initialize time constant urban variables
+    ! (this must be called before initCASA())
     ! ------------------------------------------------------------------------
 
     call t_startf('init_io1')
@@ -379,18 +641,6 @@ contains
        call restFile_getfile( file=fnamer, path=pnamer )
     end if
 
-    ! ------------------------------------------------------------------------
-    ! Initialize master history list. 
-    ! ------------------------------------------------------------------------
-    call t_startf('hist_initFlds')
-
-    call hist_initFlds()
-    ! On restart process the history namelist. Later the namelist from the restart file
-    ! will be used. But, this allows some basic checking to make sure you didn't
-    ! try to change the history namelist on restart.
-    if (nsrest == nsrContinue ) call htapes_fieldlist()
-
-    call t_stopf('hist_initFlds')
     ! ------------------------------------------------------------------------
     ! Initialize time manager
     ! ------------------------------------------------------------------------
@@ -408,9 +658,22 @@ contains
     ! ------------------------------------------------------------------------
     ! Initialize CN Ecosystem Dynamics (must be after time-manager initialization)
     ! ------------------------------------------------------------------------
-    if (use_cn .or. use_cndv) then
-       call CNEcosystemDynInit( begc, endc, begp, endp )
-    end if
+#if (defined CN) || (defined CNDV)
+    call CNEcosystemDynInit( begc, endc, begp, endp )
+#endif
+
+    ! --------------------------------------------------------------
+    ! Initialize river routing model
+    ! --------------------------------------------------------------
+
+#if (defined RTM)
+    if (masterproc) write(iulog,*)'Attempting to initialize RTM'
+    call shr_sys_flush(iulog)
+    call t_startf('init_rtm')
+    call Rtmini()
+    call t_stopf('init_rtm')
+    if (masterproc) write(iulog,*)'Successfully initialized RTM'
+#endif
 
     ! ------------------------------------------------------------------------
     ! Initialize accumulated fields
@@ -429,13 +692,17 @@ contains
     ! used in coupled carbon-nitrogen code
     ! ------------------------------------------------------------------------
     
-    if (use_cn) then
-       call t_startf('init_cninitim')
-       if (nsrest == nsrStartup) then
-          call CNiniTimeVar()
-       end if
-       call t_stopf('init_cninitim')
+#if (defined CN)
+    call t_startf('init_cninitim')
+    if (nsrest == nsrStartup) then
+       call CNiniTimeVar()
     end if
+    call t_stopf('init_cninitim')
+#elif (defined CASA)
+    call t_startf('init_casainitim')
+    call CASAiniTimeVar()
+    call t_stopf('init_casainitim')
+#endif
 
     ! ------------------------------------------------------------------------
     ! Initialization of dynamic pft weights
@@ -444,16 +711,17 @@ contains
     ! Determine correct pft weights (interpolate pftdyn dataset if initial run)
     ! Otherwise these are read in for a restart run
 
-    if (use_cndv) then
-       call pftwt_init()
-    else
-       if (flanduse_timeseries /= ' ') then
-          call t_startf('init_pftdyn')
-          call pftdyn_init()
-          call pftdyn_interp( )
-          call t_stopf('init_pftdyn')
-       end if
+#if (defined CNDV)
+    call pftwt_init()
+#else
+    if (fpftdyn /= ' ') then
+       call t_startf('init_pftdyn')
+       call pftdyn_init()
+       call pftdyn_interp( )
+       call t_stopf('init_pftdyn')
     end if
+#endif
+
 
     ! ------------------------------------------------------------------------
     ! Read restart/initial info
@@ -464,7 +732,6 @@ contains
 
     call t_startf('init_io2')
     if (do_restread()) then
-       call UrbanInitTimeVar( )
        if (masterproc) write(iulog,*)'reading restart file ',fnamer
        call restFile_read( fnamer )
     else if (nsrest == nsrStartup .and. finidat == ' ') then
@@ -477,23 +744,35 @@ contains
     ! Initialize nitrogen deposition
     ! ------------------------------------------------------------------------
 
-    if (use_cn) then
-       call t_startf('init_ndep')
-       call ndep_init()
-       call ndep_interp()
-       call t_stopf('init_ndep')
-    end if
+#ifdef CN
+    call t_startf('init_ndep')
+    call ndep_init()
+    call ndep_interp()
+    call t_stopf('init_ndep')
+#endif
     
     ! ------------------------------------------------------------------------
     ! Initialization of model parameterizations that are needed after
     ! restart file is read in
     ! ------------------------------------------------------------------------
 
+#if (defined CASA)
+    call t_startf('init_casa')
+    ! Initialize CASA 
+
+    call initCASA()
+    call initCASAPhenology()
+    call t_stopf('init_casa')
+#endif
+
     ! ------------------------------------------------------------------------
     ! Initialize history and accumator buffers
     ! ------------------------------------------------------------------------
 
     call t_startf('init_hist1')
+    ! Initialize master history list. 
+
+    call hist_initFlds()
 
     ! Initialize active history fields. This is only done if not a restart run. 
     ! If a restart run, then this information has already been obtained from the 
@@ -597,18 +876,10 @@ contains
        ! Determine gridcell averaged properties to send to atm
 
        call t_startf('init_map2gc')
-       call clm_map2gcell_minimal()
+       call clm_map2gcell(init=.true.)
        call t_stopf('init_map2gc')
 
     end if
-
-    ! Initialize sno export state
-    if (create_glacier_mec_landunit) then
-       call t_startf('init_create_s2x')
-       call update_clm_s2x(init=.true.)
-       call t_stopf('init_create_s2x')
-    end if
-
     call t_stopf('clm_init2')
 
   end subroutine initialize2
@@ -681,4 +952,42 @@ contains
     end if
   end function do_restread
   
+!------------------------------------------------------------------------
+!BOP
+!
+! !IROUTINE: cellarea
+!
+! !INTERFACE:
+  real(r8) function cellarea(latlon,i,j)
+!
+! !DESCRIPTION:
+! Comute area of grid cells (square kilometers)
+
+! !USES:
+    use domainMod , only : latlon_type
+    use clm_varcon, only : re
+!
+! !ARGUMENTS:
+    implicit none
+    type(latlon_type), intent(in   ) :: latlon    ! latlon datatype
+    integer          , intent(in)    :: i,j       ! latlon index to compute
+!
+! !REVISION HISTORY:
+! Created by Mariana Vertenstein
+!
+!
+! !LOCAL VARIABLES:
+!EOP
+    real(r8) :: deg2rad ! pi/180
+    real(r8) :: dx      ! cell width: E-W
+    real(r8) :: dy      ! cell width: N-S
+!------------------------------------------------------------------------
+
+    deg2rad = SHR_CONST_PI / 180._r8
+    dx = (latlon%lone(i) - latlon%lonw(i)) * deg2rad
+    dy = sin(latlon%latn(j)*deg2rad) - sin(latlon%lats(j)*deg2rad)
+    cellarea = dx*dy*re*re
+
+  end function cellarea
+
 end module clm_initializeMod

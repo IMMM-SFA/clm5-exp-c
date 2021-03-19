@@ -1,43 +1,48 @@
 module decompMod
 
-  !------------------------------------------------------------------------------
-  ! !DESCRIPTION:
-  ! Module provides a descomposition into a clumped data structure which can
-  ! be mapped back to atmosphere physics chunks.
-  !
-  ! !USES:
+!------------------------------------------------------------------------------
+!BOP
+!
+! !MODULE: decompMod
+!
+! !USES:
   use shr_kind_mod, only : r8 => shr_kind_r8
-  use shr_sys_mod , only : shr_sys_abort
   use spmdMod     , only : masterproc, iam, npes, mpicom, comp_id
   use clm_varctl  , only : iulog
-  use mct_mod
-  !
-  ! !PUBLIC TYPES:
+  use clm_mct_mod
+  use abortutils  , only : endrun
+!
+! !PUBLIC TYPES:
   implicit none
   integer, public :: clump_pproc ! number of clumps per MPI process
-  !
-  ! !PUBLIC MEMBER FUNCTIONS:
-
-  public get_proc_clumps    ! number of clumps for this processor
-  public get_proc_total     ! total no. of gridcells, landunits, columns and pfts for any processor
-  public get_proc_global    ! total gridcells, landunits, columns, pfts across all processors
-  public get_clmlevel_gsize ! get global size associated with clmlevel
-  public get_clmlevel_gsmap ! get gsmap associated with clmlevel
-
-  interface get_clump_bounds
-     module procedure get_clump_bounds_old
-     module procedure get_clump_bounds_new
-  end interface
-  public get_clump_bounds   ! clump beg and end gridcell,landunit,column,pft
-
-  interface get_proc_bounds
-     module procedure get_proc_bounds_old
-     module procedure get_proc_bounds_new
-  end interface
-  public get_proc_bounds    ! this processor beg and end gridcell,landunit,column,pft
-     
-  !
-  ! !PRIVATE TYPES:
+!
+! !PUBLIC MEMBER FUNCTIONS:
+  public get_clump_bounds        ! beg and end gridcell, landunit, column,
+                                 ! pft indices for clump
+  public get_proc_clumps         ! number of clumps for this processor
+  public get_proc_bounds_atm     ! beg and end gridcell for atm
+  public get_proc_bounds         ! beg and end gridcell, landunit, column,
+                                 ! pft indices for this processor
+  public get_proc_total          ! total number of gridcells, landunits,
+                                 ! columns and pfts for any processor
+  public get_proc_global         ! total gridcells, landunits, columns, pfts
+                                 ! across all processors
+  public get_proc_global_atm     ! total atm cells on all pes
+  public get_clmlevel_gsize      ! get global size associated with clmlevel
+  public get_clmlevel_dsize      ! get global size associated with clmlevel
+  public get_clmlevel_gsmap      ! get gsmap associated with clmlevel
+!
+! !DESCRIPTION:
+! Module provides a descomposition into a clumped data structure which can
+! be mapped back to atmosphere physics chunks.
+!
+! !REVISION HISTORY:
+! 2002.09.11  Forrest Hoffman  Creation.
+! 2005.11.01  T Craig  Rewrite
+! 2006.06.06  T Craig  Reduce memory, cleanup
+!
+!
+! !PRIVATE TYPES:
   private  ! (now mostly public for decompinitmod)
 
   integer,public :: nclumps     ! total number of clumps across all processors
@@ -45,14 +50,7 @@ module decompMod
   integer,public :: numl        ! total number of landunits on all procs
   integer,public :: numc        ! total number of columns on all procs
   integer,public :: nump        ! total number of pfts on all procs
-
-  type bounds_type
-     integer :: begg, endg       ! beginning and ending gridcell index
-     integer :: begl, endl       ! beginning and ending landunit index
-     integer :: begc, endc       ! beginning and ending column index
-     integer :: begp, endp       ! beginning and ending pft index
-  end type bounds_type
-  public bounds_type
+  integer,public :: numa        ! total number of atm gridcells on all procs
 
   !---global information on each pe
   type processor_type
@@ -66,6 +64,7 @@ module decompMod
      integer :: begl, endl       ! beginning and ending landunit index
      integer :: begc, endc       ! beginning and ending column index
      integer :: begp, endp       ! beginning and ending pft index
+     integer :: abegg,aendg      ! beginning and ending atm gridcell index
   end type processor_type
   public processor_type
   type(processor_type),public :: procinfo
@@ -96,63 +95,72 @@ module decompMod
   end type decomp_type
   public decomp_type
   type(decomp_type),public,target :: ldecomp
+  type(decomp_type),public,target :: adecomp
 
+  type(mct_gsMap)  ,public,target :: gsMap_atm_gdc2glo
   type(mct_gsMap)  ,public,target :: gsMap_lnd_gdc2glo
+
   type(mct_gsMap)  ,public,target :: gsMap_gce_gdc2glo
   type(mct_gsMap)  ,public,target :: gsMap_lun_gdc2glo
   type(mct_gsMap)  ,public,target :: gsMap_col_gdc2glo
   type(mct_gsMap)  ,public,target :: gsMap_pft_gdc2glo
-  !------------------------------------------------------------------------------
+
+!EOP
+!------------------------------------------------------------------------------
+! 
+! 
+!------------------------------------------------------------------------------
 
 contains
 
-  !------------------------------------------------------------------------------
-   subroutine get_clump_bounds_new (n, bounds)
-     !
-     ! !DESCRIPTION:
-     ! Determine clump bounds
-     !
-     ! !ARGUMENTS:
+!------------------------------------------------------------------------------
+!BOP
+!
+! !IROUTINE: get_clump_bounds
+!
+! !INTERFACE:
+   subroutine get_clump_bounds (n, begg, endg, begl, endl, begc, endc, &
+                                begp, endp)
+!
+! !USES:
+!
+! !ARGUMENTS:
      implicit none
-     integer, intent(in)  :: n                ! processor clump index
-     type(bounds_type), intent(out) :: bounds ! clump bounds
-     !
-     ! !LOCAL VARIABLES:
+     integer, intent(in)  :: n           ! proc clump index
+     integer, intent(out) :: begp, endp  ! clump beginning and ending
+                                         ! pft indices
+     integer, intent(out) :: begc, endc  ! clump beginning and ending
+                                         ! column indices
+     integer, intent(out) :: begl, endl  ! clump beginning and ending
+                                         ! landunit indices
+     integer, intent(out) :: begg, endg  ! clump beginning and ending
+                                         ! gridcell indices
+!
+! !DESCRIPTION:
+! Determine clump beginning and ending pft, column, landunit and
+! gridcell indices.
+!
+! !REVISION HISTORY:
+! 2003.09.12  Mariana Vertenstein  Creation.
+!
+!
+! !LOCAL VARIABLES:
+!EOP
      character(len=32), parameter :: subname = 'get_clump_bounds'  ! Subroutine name
      integer :: cid                                                ! clump id
 #ifdef _OPENMP
      integer, external :: OMP_GET_MAX_THREADS
      integer, external :: OMP_GET_NUM_THREADS
 #endif
-     !------------------------------------------------------------------------------
-     !    Make sure this IS being called from a threaded region
+!------------------------------------------------------------------------------
+!
+!    Make sure this IS being called from a threaded region
+!
 #ifdef _OPENMP
      if ( OMP_GET_NUM_THREADS() == 1 .and. OMP_GET_MAX_THREADS() > 1 )then
-        call shr_sys_abort( trim(subname)//' ERROR: Calling from inside a non-threaded region)')
+        call endrun( trim(subname)//' ERROR: Calling from inside a non-threaded region -- this results in bad performance' )
      end if
 #endif
-
-     cid  = procinfo%cid(n)
-     bounds%begp = clumps(cid)%begp
-     bounds%endp = clumps(cid)%endp
-     bounds%begc = clumps(cid)%begc
-     bounds%endc = clumps(cid)%endc
-     bounds%begl = clumps(cid)%begl
-     bounds%endl = clumps(cid)%endl
-     bounds%begg = clumps(cid)%begg
-     bounds%endg = clumps(cid)%endg
-   end subroutine get_clump_bounds_new
-
-   !------------------------------------------------------------------------------
-   subroutine get_clump_bounds_old (n, begg, endg, begl, endl, begc, endc, begp, endp)
-     implicit none
-     integer, intent(in)  :: n           ! proc clump index
-     integer, intent(out) :: begp, endp  ! clump beg and end pft indices
-     integer, intent(out) :: begc, endc  ! clump beg and end column indices
-     integer, intent(out) :: begl, endl  ! clump beg and end landunit indices
-     integer, intent(out) :: begg, endg  ! clump beg and end gridcell indices
-     integer :: cid                                                ! clump id
-     !------------------------------------------------------------------------------
 
      cid  = procinfo%cid(n)
      begp = clumps(cid)%begp
@@ -163,82 +171,154 @@ contains
      endl = clumps(cid)%endl
      begg = clumps(cid)%begg
      endg = clumps(cid)%endg
-   end subroutine get_clump_bounds_old
 
-   !------------------------------------------------------------------------------
-   subroutine get_proc_bounds_new (bounds)
-     !
-     ! !DESCRIPTION:
-     ! Retrieve processor bounds
-     !
-     ! !ARGUMENTS:
+   end subroutine get_clump_bounds
+
+!------------------------------------------------------------------------------
+!BOP
+!
+! !IROUTINE: get_proc_bounds
+!
+! !INTERFACE:
+   subroutine get_proc_bounds (begg, endg, begl, endl, begc, endc, &
+                               begp, endp)
+!
+! !USES:
+!
+! !ARGUMENTS:
      implicit none
-     type(bounds_type), intent(out) :: bounds ! processor bounds bounds
-     !
-     ! !LOCAL VARIABLES:
+     integer, optional, intent(out) :: begp, endp  ! proc beginning and ending
+                                                   ! pft indices
+     integer, optional, intent(out) :: begc, endc  ! proc beginning and ending
+                                                   ! column indices
+     integer, optional, intent(out) :: begl, endl  ! proc beginning and ending
+                                                   ! landunit indices
+     integer, optional, intent(out) :: begg, endg  ! proc beginning and ending
+                                                   ! gridcell indices
+! !DESCRIPTION:
+! Retrieve gridcell, landunit, column, and pft bounds for process.
+!
+! !REVISION HISTORY:
+! 2003.09.12  Mariana Vertenstein  Creation.
+!
+! !LOCAL VARIABLES:
+!EOP
+     character(len=32), parameter :: subname = 'get_proc_bounds'  ! Subroutine name
 #ifdef _OPENMP
      integer, external :: OMP_GET_NUM_THREADS
 #endif
-     character(len=32), parameter :: subname = 'get_proc_bounds'  ! Subroutine name
-     !------------------------------------------------------------------------------
-     !    Make sure this is NOT being called from a threaded region
+!------------------------------------------------------------------------------
+!
+!    Make sure this is NOT being called from a threaded region
+!
 #ifdef _OPENMP
      if ( OMP_GET_NUM_THREADS() > 1 )then
-        call shr_sys_abort( trim(subname)//' ERROR: Calling from inside  a threaded region')
+        call endrun( trim(subname)//' ERROR: Calling from inside a threaded region -- this is illegal' )
      end if
 #endif
 
-     bounds%begp = procinfo%begp
-     bounds%endp = procinfo%endp
-     bounds%begc = procinfo%begc
-     bounds%endc = procinfo%endc
-     bounds%begl = procinfo%begl
-     bounds%endl = procinfo%endl
-     bounds%begg = procinfo%begg
-     bounds%endg = procinfo%endg
+     if (present(begp)) then
+        begp = procinfo%begp
+     endif
+     if (present(endp)) then
+        endp = procinfo%endp
+     endif
+     if (present(begc)) then
+        begc = procinfo%begc
+     endif
+     if (present(endc)) then
+        endc = procinfo%endc
+     endif
+     if (present(begl)) then
+        begl = procinfo%begl
+     endif
+     if (present(endl)) then
+        endl = procinfo%endl
+     endif
+     if (present(begg)) then
+        begg = procinfo%begg
+     endif
+     if (present(endg)) then
+        endg = procinfo%endg
+     endif
 
-   end subroutine get_proc_bounds_new
+   end subroutine get_proc_bounds
 
-   !------------------------------------------------------------------------------
-   subroutine get_proc_bounds_old (begg, endg, begl, endl, begc, endc, begp, endp, &
-        begCohort, endCohort)
+!------------------------------------------------------------------------------
+!BOP
+!
+! !IROUTINE: get_proc_bounds_atm
+!
+! !INTERFACE:
+   subroutine get_proc_bounds_atm (begg, endg)
+!
+! !USES:
+!
+! !ARGUMENTS:
      implicit none
-     integer, optional, intent(out) :: begp, endp  ! proc beg and end pft indices
-     integer, optional, intent(out) :: begc, endc  ! proc beg and end column indices
-     integer, optional, intent(out) :: begl, endl  ! proc beg and end landunit indices
-     integer, optional, intent(out) :: begg, endg  ! proc beg and end gridcell indices
-     ! these are dummy arguments for backwards compatibility with 4_5 in
-     ! util_share/accumulMod.F90.  4_0 will never have a cohort dimension
-     integer, optional, intent(out) :: begCohort, endCohort  ! cohort beg and end gridcell indices
-     !------------------------------------------------------------------------------
+     integer, intent(out) :: begg, endg  ! proc beginning and ending
+                                         ! gridcell indices for atm grid
+! !DESCRIPTION:
+! Retrieve gridcell begg, endg for atm decomp
+!
+! !REVISION HISTORY:
+! 2005.12.15  T Craig Added
+!
+!------------------------------------------------------------------------------
+! !LOCAL VARIABLES:
+!EOP
+     character(len=32), parameter :: subname = 'get_proc_bounds_atm'  ! Subroutine name
+#ifdef _OPENMP
+     integer, external :: OMP_GET_NUM_THREADS
+#endif
+!------------------------------------------------------------------------------
+!
+!    Make sure this is NOT being called from a threaded region
+!
+#ifdef _OPENMP
+     if ( OMP_GET_NUM_THREADS() > 1 )then
+        call endrun( trim(subname)//' ERROR: Calling from inside a threaded region -- this is illegal' )
+     end if
+#endif
 
-     if (present(begp)) begp = procinfo%begp
-     if (present(endp)) endp = procinfo%endp
-     if (present(begc)) begc = procinfo%begc
-     if (present(endc)) endc = procinfo%endc
-     if (present(begl)) begl = procinfo%begl
-     if (present(endl)) endl = procinfo%endl
-     if (present(begg)) begg = procinfo%begg
-     if (present(endg)) endg = procinfo%endg
-   end subroutine get_proc_bounds_old
+   begg = procinfo%abegg
+   endg = procinfo%aendg
 
-   !------------------------------------------------------------------------------
+   end subroutine get_proc_bounds_atm
+
+!------------------------------------------------------------------------------
+!BOP
+!
+! !IROUTINE: get_proc_total
+!
+! !INTERFACE:
    subroutine get_proc_total(pid, ncells, nlunits, ncols, npfts)
-     !
-     ! !DESCRIPTION:
-     ! Count up gridcells, landunits, columns, and pfts on process.
-     !
-     ! !ARGUMENTS:
+!
+! !DESCRIPTION:
+! Count up gridcells, landunits, columns, and pfts on process.
+!
+! !USES:
+!
+! !ARGUMENTS:
      implicit none
      integer, intent(in)  :: pid     ! proc id
-     integer, intent(out) :: ncells  ! total number of gridcells on the processor
-     integer, intent(out) :: nlunits ! total number of landunits on the processor
-     integer, intent(out) :: ncols   ! total number of columns on the processor
-     integer, intent(out) :: npfts   ! total number of pfts on the processor
-     !
-     ! !LOCAL VARIABLES:
-     integer :: cid       ! clump index
-     !------------------------------------------------------------------------------
+     integer, intent(out) :: ncells  ! total number of gridcells
+                                     ! on the processor
+     integer, intent(out) :: nlunits ! total number of landunits
+                                     ! on the processor
+     integer, intent(out) :: ncols   ! total number of columns
+                                     ! on the processor
+     integer, intent(out) :: npfts   ! total number of pfts
+                                     ! on the processor
+!
+! !REVISION HISTORY:
+! 2003.09.12  Mariana Vertenstein  Creation.
+!
+!
+! !LOCAL VARIABLES:
+!EOP
+   integer :: cid       ! clump index
+!------------------------------------------------------------------------------
 
      npfts   = 0
      nlunits = 0
@@ -252,108 +332,306 @@ contains
            npfts   = npfts   + clumps(cid)%npfts
         end if
      end do
+
    end subroutine get_proc_total
 
-   !------------------------------------------------------------------------------
-   subroutine get_proc_global(ng, nl, nc, np, nCohorts)
-     !
-     ! !DESCRIPTION:
-     ! Return number of gridcells, landunits, columns, and pfts across all processes.
-     !
-     ! !ARGUMENTS:
+!------------------------------------------------------------------------------
+!BOP
+!
+! !IROUTINE: get_proc_global
+!
+! !INTERFACE:
+   subroutine get_proc_global(ng, nl, nc, np)
+!
+! !DESCRIPTION:
+! Return number of gridcells, landunits, columns, and pfts across all
+! processes.
+!
+! !USES:
+!
+! !ARGUMENTS:
      implicit none
-     integer, intent(out) :: ng  ! total number of gridcells across all processors
-     integer, intent(out) :: nl  ! total number of landunits across all processors
-     integer, intent(out) :: nc  ! total number of columns across all processors
-     integer, intent(out) :: np  ! total number of pfts across all processors
-     ! this is a dummy argument for backwards compatibility with 4_5 in
-     ! util_share/accumulMod.F90.  4_0 will never have a cohort dimension
-     integer, optional, intent(out) :: nCohorts  ! total number ED cohorts
-     !------------------------------------------------------------------------------
+     integer, intent(out) :: ng  ! total number of gridcells
+                                 ! across all processors
+     integer, intent(out) :: nl  ! total number of landunits
+                                 ! across all processors
+     integer, intent(out) :: nc  ! total number of columns
+                                 ! across all processors
+     integer, intent(out) :: np  ! total number of pfts
+                                 ! across all processors
+! !REVISION HISTORY:
+! 2003.09.12  Mariana Vertenstein  Creation.
+!
+!EOP
+!------------------------------------------------------------------------------
 
      np = nump
      nc = numc
      nl = numl
      ng = numg
+
    end subroutine get_proc_global
 
-   !------------------------------------------------------------------------------
-   integer function get_proc_clumps()
-     !
-     ! !DESCRIPTION:
-     ! Return the number of clumps.
-     !
-     ! !ARGUMENTS:
+!------------------------------------------------------------------------------
+!BOP
+!
+! !IROUTINE: get_proc_global_atm
+!
+! !INTERFACE:
+   subroutine get_proc_global_atm(na)
+!
+! !DESCRIPTION:
+! Return number of gridcells, landunits, columns, and pfts across all
+! processes.
+!
+! !USES:
+!
+! !ARGUMENTS:
      implicit none
-     !------------------------------------------------------------------------------
+     integer, intent(out) :: na  ! total number of atm gridcells
+                                 ! across all processors
+! !REVISION HISTORY:
+! 2003.09.12  Mariana Vertenstein  Creation.
+!
+!EOP
+!------------------------------------------------------------------------------
+
+     na = numa
+
+   end subroutine get_proc_global_atm
+
+
+!------------------------------------------------------------------------------
+!BOP
+!
+! !IROUTINE: get_proc_clumps
+!
+! !INTERFACE:
+   integer function get_proc_clumps()
+!
+! !DESCRIPTION:
+! Return the number of clumps.
+!
+! !USES:
+!
+! !ARGUMENTS:
+     implicit none
+!
+! !RETURN VALUE:
+!    integer :: get_proc_clumps
+!
+! !REVISION HISTORY:
+! 2003.09.12  Mariana Vertenstein  Creation.
+!
+!EOP
+!------------------------------------------------------------------------------
 
      get_proc_clumps = procinfo%nclumps
 
    end function get_proc_clumps
 
-   !-----------------------------------------------------------------------
-   integer function get_clmlevel_gsize (clmlevel)
-     !
-     ! !DESCRIPTION:
-     ! Determine 1d size from clmlevel
-     !
-     ! !USES:
-     use clmtype  , only : grlnd, nameg, namel, namec, namep
-     use domainMod, only : ldomain
-     !
-     ! !ARGUMENTS:
-     implicit none
-     character(len=*), intent(in) :: clmlevel    !type of clm 1d array
-     !-----------------------------------------------------------------------
+!-----------------------------------------------------------------------
+!BOP
+!
+! !IROUTINE: get_clmlevel_gsize
+!
+! !INTERFACE:
+  integer function get_clmlevel_gsize (clmlevel)
+!
+! !DESCRIPTION:
+! Determine 1d size from clmlevel
+!
+! !USES:
+  use clmtype  , only : gratm, grlnd, nameg, namel, namec, namep, allrof
+  use domainMod, only : adomain,ldomain
+#ifdef RTM
+  use clm_varpar,only : rtmlon,rtmlat
+#endif
+!
+! !ARGUMENTS:
+    implicit none
+    character(len=*), intent(in) :: clmlevel    !type of clm 1d array
+!
+! !REVISION HISTORY:
+!
+!
+! !LOCAL VARIABLES:
+!EOP
 
-     select case (clmlevel)
-     case(grlnd)
-        get_clmlevel_gsize = ldomain%ns
-     case(nameg)
-        get_clmlevel_gsize = numg
-     case(namel)
-        get_clmlevel_gsize = numl
-     case(namec)
-        get_clmlevel_gsize = numc
-     case(namep)
-        get_clmlevel_gsize = nump
-     case default
-        write(iulog,*) 'get_clmlevel_gsize does not match clmlevel type: ', trim(clmlevel)
-        call shr_sys_abort()
-     end select
-
-   end function get_clmlevel_gsize
-
-   !-----------------------------------------------------------------------
-   subroutine get_clmlevel_gsmap (clmlevel, gsmap)
-     !
-     ! !DESCRIPTION:
-     ! Compute arguments for gatherv, scatterv for vectors
-     !
-     ! !USES:
-     use clmtype, only : grlnd, nameg, namel, namec, namep
-     !
-     ! !ARGUMENTS:
-     implicit none
-     character(len=*), intent(in) :: clmlevel     ! type of input data
-     type(mct_gsmap) , pointer    :: gsmap
-     !----------------------------------------------------------------------
+!-----------------------------------------------------------------------
+    ! Determine necessary indices
 
     select case (clmlevel)
+    case(gratm)
+       get_clmlevel_gsize = adomain%ns
+    case(grlnd)
+       get_clmlevel_gsize = ldomain%ns
+    case(nameg)
+       get_clmlevel_gsize = numg
+    case(namel)
+       get_clmlevel_gsize = numl
+    case(namec)
+       get_clmlevel_gsize = numc
+    case(namep)
+       get_clmlevel_gsize = nump
+#ifdef RTM
+    case(allrof)
+       get_clmlevel_gsize = rtmlon*rtmlat
+#endif
+    case default
+       write(iulog,*) 'get_clmlevel_gsize does not match clmlevel type: ', trim(clmlevel)
+       call endrun()
+    end select
+
+  end function get_clmlevel_gsize
+!-----------------------------------------------------------------------
+!BOP
+!
+! !IROUTINE: get_clmlevel_dsize
+!
+! !INTERFACE:
+  subroutine get_clmlevel_dsize (clmlevel,dims,s1,s2,s3,s4)
+!
+! !DESCRIPTION:
+! Determine number of dims and size of dims from clmlevel
+!
+! !USES:
+  use clmtype  , only : gratm, grlnd, nameg, namel, namec, namep, allrof
+  use domainMod, only : adomain,ldomain
+#ifdef RTM
+  use clm_varpar,only : rtmlon,rtmlat
+#endif
+!
+! !ARGUMENTS:
+    implicit none
+    character(len=*), intent(in ) :: clmlevel    !type of clm 1d array
+    integer,          intent(out) :: dims        ! number of dimensions
+    integer,optional, intent(out) :: s1          ! size of dim1
+    integer,optional, intent(out) :: s2          ! size of dim2
+    integer,optional, intent(out) :: s3          ! size of dim3
+    integer,optional, intent(out) :: s4          ! size of dim4
+
+!
+! !REVISION HISTORY:
+!
+!
+! !LOCAL VARIABLES:
+!EOP
+    integer :: ls(4)
+
+!-----------------------------------------------------------------------
+    ! Determine necessary indices
+
+    dims = 1
+    ls = 1
+
+    select case (clmlevel)
+    case(gratm)
+       dims = 2
+       ls(1) = adomain%ni
+       ls(2) = adomain%nj
+    case(grlnd)
+       dims = 2
+       ls(1) = ldomain%ni
+       ls(2) = ldomain%nj
+    case(nameg)
+       ls(1) = numg
+    case(namel)
+       ls(1) = numl
+    case(namec)
+       ls(1) = numc
+    case(namep)
+       ls(1) = nump
+#ifdef RTM
+    case(allrof)
+       dims = 2
+       ls(1) = rtmlon
+       ls(2) = rtmlat
+#endif
+    case default
+       write(iulog,*) 'get_clmlevel_dsize does not match clmlevel type: ', trim(clmlevel)
+       call endrun()
+    end select
+
+    if (present(s1)) then
+       s1 = ls(1)
+    endif
+    if (present(s2)) then
+       s2 = ls(2)
+    endif
+    if (present(s3)) then
+       s3 = ls(3)
+    endif
+    if (present(s4)) then
+       s4 = ls(4)
+    endif
+
+  end subroutine get_clmlevel_dsize
+!-----------------------------------------------------------------------
+!BOP
+!
+! !IROUTINE: get_clmlevel_gsmap
+!
+! !INTERFACE:
+  subroutine get_clmlevel_gsmap (clmlevel, gsmap)
+!
+! !DESCRIPTION:
+! Compute arguments for gatherv, scatterv for vectors
+!
+! !USES:
+    use clmtype  , only : gratm, grlnd, nameg, namel, namec, namep, allrof
+
+#if (defined RTM)
+    use RunoffMod, only : gsMap_rtm_gdc2glo
+#endif
+!
+! !ARGUMENTS:
+    implicit none
+    character(len=*), intent(in) :: clmlevel     ! type of input data
+    type(mct_gsmap), pointer :: gsmap
+
+! !REVISION HISTORY:
+! Author: Mariana Vertenstein
+!
+!
+! !LOCAL VARIABLES:
+!EOP
+
+!----------------------------------------------------------------------
+
+    select case (clmlevel)
+    case(gratm)
+       gsmap => gsmap_atm_gdc2glo
+
     case(grlnd)
        gsmap => gsmap_lnd_gdc2glo
+
     case(nameg)
        gsmap => gsmap_gce_gdc2glo
+
     case(namel)
        gsmap => gsmap_lun_gdc2glo
+
     case(namec)
        gsmap => gsmap_col_gdc2glo
+
     case(namep)
        gsmap => gsmap_pft_gdc2glo
+
+#if (defined RTM)
+    case(allrof)
+       gsmap => gsmap_rtm_gdc2glo
+#endif
+
     case default
+
        write(iulog,*) 'get_clmlevel_gsmap: Invalid expansion character: ',trim(clmlevel)
-       call shr_sys_abort()
+       call endrun
+
     end select
+
   end subroutine get_clmlevel_gsmap
+
+!------------------------------------------------------------------------------
 
 end module decompMod

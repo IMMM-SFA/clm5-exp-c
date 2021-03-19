@@ -9,22 +9,25 @@ subroutine iniTimeConst
 ! !DESCRIPTION:
 ! Initialize time invariant clm variables
 ! 1) removed references to shallow lake - since it is not used
-! 2) ***Make z, zi and dz allocatable depending on if you
+! 2) ***Make c%z, c%zi and c%dz allocatable depending on if you
 !    have lake or soil
 ! 3) rootfr only initialized for soil points
 !
 ! !USES:
   use shr_kind_mod, only : r8 => shr_kind_r8
+  use shr_sys_mod, only: shr_sys_flush
+  use nanMod      , only : nan
   use clmtype
   use decompMod   , only : get_proc_bounds, get_proc_global
   use decompMod   , only : gsMap_lnd_gdc2glo
   use clm_atmlnd  , only : clm_a2l
-  use clm_varpar  , only : nlevsoi, nlevgrnd, nlevlak, numpft, numrad, nlevurb
+  use clm_varpar  , only : nlevsoi, nlevgrnd, nlevlak, lsmlon, lsmlat, numpft, numrad, nlevurb
   use clm_varcon  , only : istice, istdlak, istwet, isturb, istice_mec,  &
                            icol_roof, icol_sunwall, icol_shadewall, icol_road_perv, icol_road_imperv, &
                            zlak, dzlak, zsoi, dzsoi, zisoi, spval, &
                            albsat, albdry, secspday
-  use clm_varctl  , only : fsurdat,scmlon,scmlat,single_column, iulog, use_cn, use_cndv
+  use clm_varctl  , only : fsurdat,scmlon,scmlat,single_column
+  use clm_varctl  , only : iulog
   use pftvarcon   , only : noveg, ntree, roota_par, rootb_par,  &
                            smpso, smpsc, fnitr, nbrdlf_dcd_brl_shrub, &
                            z0mr, displar, dleaf, rhol, rhos, taul, taus, xl, &
@@ -44,7 +47,7 @@ subroutine iniTimeConst
   use clm_varctl      , only : fsnowoptics, fsnowaging
   use SNICARMod       , only : SnowAge_init, SnowOptics_init
   use shr_scam_mod    , only : shr_scam_getCloseLatLon
-  use ncdio_pio       , only : file_desc_t, ncd_io, ncd_pio_openfile, ncd_pio_closefile
+  use ncdio_pio       
 
 !
 ! !ARGUMENTS:
@@ -114,6 +117,11 @@ subroutine iniTimeConst
   real(r8), pointer :: max_dayl(:)        ! maximum daylength (s)
   real(r8), pointer :: sandfrac(:)
   real(r8), pointer :: clayfrac(:)
+  real(r8), pointer :: cs_p(:)             ! shape parameter for CTI
+  real(r8), pointer :: fff_p(:)            ! decay factor for surface runoff
+  real(r8), pointer :: qdm_p(:)            ! maximum subsurface runoff
+  real(r8), pointer :: sy_p(:)             ! specific yield
+
 !
 !
 ! !OTHER LOCAL VARIABLES:
@@ -148,6 +156,22 @@ subroutine iniTimeConst
   real(r8),pointer :: clay3d(:,:)    ! read in - soil texture: percent clay
   real(r8),pointer :: organic3d(:,:) ! read in - organic matter: kg/m3
   real(r8),pointer :: gti(:)         ! read in - fmax
+  !------------------------------
+  ! for land UQ at PNNL, Huang+Hou
+  ! totally 10 parameters, Famx (gti) already defined
+
+  real(r8),pointer :: Cs(:)          ! read in - CTI shape parameter
+  real(r8),pointer :: Fover(:)       ! read in - decay factor for surface runoff (1/m)
+  real(r8),pointer :: Bch(:,:)         ! read in - Clapp and Hornberger exponent
+  real(r8),pointer :: Fdrai(:)       ! read in - decay factor for subsurface runoff (1/m)
+  real(r8),pointer :: Qdm(:)         ! read in - maximum subsurface runoff (kg/m2/s)
+
+  real(r8),pointer :: Ks(:,:)          ! read in - hydraulic conductivity (mm/s)      
+  real(r8),pointer :: Thetas(:,:)      ! read in - porosity                           
+  real(r8),pointer :: Psis(:,:)        ! read in - saturated soil matrix petential (mm) 
+  real(r8),pointer :: Sy(:)          ! read in - average specific yield 
+
+  !------------------------------
   real(r8) :: om_frac                ! organic matter fraction
   real(r8) :: om_watsat    = 0.9_r8  ! porosity of organic soil
   real(r8) :: om_hksat     = 0.1_r8  ! saturated hydraulic conductivity of organic soil [mm/s]
@@ -164,6 +188,7 @@ subroutine iniTimeConst
   real(r8) :: perc_norm               ! normalize to 1 when 100% organic soil
   real(r8) :: uncon_hksat             ! series conductivity of mineral/organic soil
   real(r8) :: uncon_frac              ! fraction of "unconnected" soil
+  integer  :: start(3),count(3)      ! netcdf start/count arrays
   integer  :: varid                  ! netCDF id's
   integer  :: ret
 
@@ -192,63 +217,72 @@ subroutine iniTimeConst
   call get_proc_global(numg, numl, numc, nump)
 
   allocate(soic2d(begg:endg), gti(begg:endg))
-  allocate(sand3d(begg:endg,nlevsoi), clay3d(begg:endg,nlevsoi))
+  allocate(sand3d(begg:endg,nlevsoi),clay3d(begg:endg,nlevsoi))
   allocate(organic3d(begg:endg,nlevsoi))
+  allocate(Cs(begg:endg), Fover(begg:endg), Bch(begg:endg,nlevsoi))
+  allocate(Fdrai(begg:endg), Qdm(begg:endg), Ks(begg:endg,nlevsoi))
+  allocate(Thetas(begg:endg,nlevsoi), Psis(begg:endg,nlevsoi), Sy(begg:endg))
 
   allocate(temp_ef(begg:endg),efisop2d(6,begg:endg))
 
-  efisop          => gve%efisop
+  efisop          => clm3%g%gve%efisop
 
   ! Assign local pointers to derived subtypes components (gridcell-level)
-  lat             => grc%lat
+  lat             => clm3%g%lat
      
   ! Assign local pointers to derived subtypes components (landunit-level)
 
-  ltype               => lun%itype
-  thick_wall          => lps%thick_wall
-  thick_roof          => lps%thick_roof
+  ltype               => clm3%g%l%itype
+  thick_wall          => clm3%g%l%lps%thick_wall
+  thick_roof          => clm3%g%l%lps%thick_roof
 
   ! Assign local pointers to derived subtypes components (column-level)
 
-  ctype           => col%itype
-  clandunit       => col%landunit
-  cgridcell       => col%gridcell
-  z               => cps%z
-  dz              => cps%dz
-  zi              => cps%zi
-  bsw             => cps%bsw
-  bsw2            => cps%bsw2
-  psisat          => cps%psisat
-  vwcsat          => cps%vwcsat
-  watsat          => cps%watsat
-  watfc           => cps%watfc
-  watdry          => cps%watdry  
-  watopt          => cps%watopt  
-  rootfr_road_perv => cps%rootfr_road_perv
-  hksat           => cps%hksat
-  sucsat          => cps%sucsat
-  tkmg            => cps%tkmg
-  tksatu          => cps%tksatu
-  tkdry           => cps%tkdry
-  csol            => cps%csol
-  smpmin          => cps%smpmin
-  hkdepth         => cps%hkdepth
-  wtfact          => cps%wtfact
-  isoicol         => cps%isoicol
-  gwc_thr         => cps%gwc_thr
-  mss_frc_cly_vld => cps%mss_frc_cly_vld
-  max_dayl        => cps%max_dayl
+  ctype           => clm3%g%l%c%itype
+  clandunit       => clm3%g%l%c%landunit
+  cgridcell       => clm3%g%l%c%gridcell
+  z               => clm3%g%l%c%cps%z
+  dz              => clm3%g%l%c%cps%dz
+  zi              => clm3%g%l%c%cps%zi
+  bsw             => clm3%g%l%c%cps%bsw
+  bsw2            => clm3%g%l%c%cps%bsw2
+  psisat          => clm3%g%l%c%cps%psisat
+  vwcsat          => clm3%g%l%c%cps%vwcsat
+  watsat          => clm3%g%l%c%cps%watsat
+  watfc           => clm3%g%l%c%cps%watfc
+  watdry          => clm3%g%l%c%cps%watdry  
+  watopt          => clm3%g%l%c%cps%watopt  
+  rootfr_road_perv => clm3%g%l%c%cps%rootfr_road_perv
+  hksat           => clm3%g%l%c%cps%hksat
+  sucsat          => clm3%g%l%c%cps%sucsat
+  tkmg            => clm3%g%l%c%cps%tkmg
+  tksatu          => clm3%g%l%c%cps%tksatu
+  tkdry           => clm3%g%l%c%cps%tkdry
+  csol            => clm3%g%l%c%cps%csol
+  smpmin          => clm3%g%l%c%cps%smpmin
+  hkdepth         => clm3%g%l%c%cps%hkdepth
+  wtfact          => clm3%g%l%c%cps%wtfact
+  !for land UQ
+  fff_p           => clm3%g%l%c%cps%fff
+  cs_p            => clm3%g%l%c%cps%cs
+  qdm_p           => clm3%g%l%c%cps%qdm
+  sy_p            => clm3%g%l%c%cps%sy
+  !-----------------------------------
+  isoicol         => clm3%g%l%c%cps%isoicol
+  gwc_thr         => clm3%g%l%c%cps%gwc_thr
+  mss_frc_cly_vld => clm3%g%l%c%cps%mss_frc_cly_vld
+  max_dayl        => clm3%g%l%c%cps%max_dayl
 
   ! Assign local pointers to derived subtypes components (pft-level)
 
-  ivt             => pft%itype
-  pgridcell       => pft%gridcell
-  pcolumn         => pft%column
-  dewmx           => pps%dewmx
-  rootfr          => pps%rootfr
-  rresis          => pps%rresis
-  sandfrac        => pps%sandfrac
-  clayfrac        => pps%clayfrac
+  ivt             => clm3%g%l%c%p%itype
+  pgridcell       => clm3%g%l%c%p%gridcell
+  pcolumn         => clm3%g%l%c%p%column
+  dewmx           => clm3%g%l%c%p%pps%dewmx
+  rootfr          => clm3%g%l%c%p%pps%rootfr
+  rresis          => clm3%g%l%c%p%pps%rresis
+  sandfrac        => clm3%g%l%c%p%pps%sandfrac
+  clayfrac        => clm3%g%l%c%p%pps%clayfrac
 
   allocate(zurb_wall(begl:endl,nlevurb),    &
            zurb_roof(begl:endl,nlevurb),    &
@@ -275,8 +309,12 @@ subroutine iniTimeConst
   ! Determine number of soil color classes - if number of soil color classes is not
   ! on input dataset set it to 8
 
+  count(1) = lsmlon
+  count(2) = lsmlat
   if (single_column) then
      call shr_scam_getCloseLatLon(locfn,scmlat,scmlon,closelat,closelon,closelatidx,closelonidx)
+     start(1) = closelonidx
+     start(2) = closelatidx
   end if
   call ncd_io(ncid=ncid, varname='mxsoil_color', flag='read', data=mxsoil_color, &
               readvar=readvar)
@@ -324,12 +362,46 @@ subroutine iniTimeConst
   call ncd_io(ncid=ncid, varname='PCT_CLAY', flag='read', data=clay3d, dim1name=grlnd, readvar=readvar)
   if (.not. readvar) call endrun( trim(subname)//' ERROR: PCT_CLAY NOT on surfdata file' ) 
 
-  call ncd_pio_closefile(ncid)
-
   if (masterproc) then
      write(iulog,*) 'Successfully read fmax, soil color, sand and clay boundary data'
      write(iulog,*)
   endif
+
+  call ncd_io(ncid=ncid, varname='CS', flag='read', data=Cs, dim1name=grlnd, readvar=readvar)
+  if (.not. readvar) call endrun( trim(subname)//' ERROR: CS NOT on surfdata file' )
+  call ncd_io(ncid=ncid, varname='FOVER', flag='read', data=Fover, dim1name=grlnd, readvar=readvar)
+  if (.not. readvar) call endrun( trim(subname)//' ERROR: FOVER NOT on surfdata file' )
+
+  call ncd_io(ncid=ncid, varname='BCH', flag='read', data=Bch, dim1name=grlnd, readvar=readvar)
+  if (.not. readvar) call endrun( trim(subname)//' ERROR: BCH NOT on surfdata file' )
+
+  call ncd_io(ncid=ncid, varname='FDRAI', flag='read', data=Fdrai, dim1name=grlnd, readvar=readvar)
+  if (.not. readvar) call endrun( trim(subname)//' ERROR: FDRAI NOT on surfdata file' )
+
+  call ncd_io(ncid=ncid, varname='QDM', flag='read', data=Qdm, dim1name=grlnd, readvar=readvar)
+  if (.not. readvar) call endrun( trim(subname)//' ERROR: QDM NOT on surfdata file' )
+
+  if (masterproc) then
+     write(iulog,*) 'Successfully read Cs, Fover, Bch, Fdrai, Qdm'
+     write(iulog,*)
+  endif
+
+  call ncd_io(ncid=ncid, varname='KS', flag='read', data=Ks, dim1name=grlnd, readvar=readvar)
+  if (.not. readvar) call endrun( trim(subname)//' ERROR: KS NOT on surfdata file' )
+  call ncd_io(ncid=ncid, varname='THETAS', flag='read', data=Thetas, dim1name=grlnd, readvar=readvar)
+  if (.not. readvar) call endrun( trim(subname)//' ERROR: THETAS NOT on surfdata file' )
+  call ncd_io(ncid=ncid, varname='PSIS', flag='read', data=Psis, dim1name=grlnd, readvar=readvar)
+  if (.not. readvar) call endrun( trim(subname)//' ERROR: PSIS NOT on surfdata file' )
+  call ncd_io(ncid=ncid, varname='SY', flag='read', data=Sy, dim1name=grlnd, readvar=readvar)
+  if (.not. readvar) call endrun( trim(subname)//' ERROR: SY NOT on surfdata file' )
+
+  call ncd_pio_closefile(ncid)
+
+  if (masterproc) then
+     write(iulog,*) 'Successfully read Ks, Thetas, Psis, Sy'
+     write(iulog,*)
+  endif
+
 
   ! Determine saturated and dry soil albedos for n color classes and 
   ! numrad wavebands (1=vis, 2=nir)
@@ -427,24 +499,24 @@ subroutine iniTimeConst
       pftcon%dwood(m) = dwood
    end do
 
-   if (use_cndv) then
-      do m = 0,numpft
-         dgv_pftcon%crownarea_max(m) = pftpar20(m)
-         dgv_pftcon%tcmin(m) = pftpar28(m)
-         dgv_pftcon%tcmax(m) = pftpar29(m)
-         dgv_pftcon%gddmin(m) = pftpar30(m)
-         dgv_pftcon%twmax(m) = pftpar31(m)
-         dgv_pftcon%reinickerp(m) = reinickerp
-         dgv_pftcon%allom1(m) = allom1
-         dgv_pftcon%allom2(m) = allom2
-         dgv_pftcon%allom3(m) = allom3
-         ! modification for shrubs by X.D.Z
-         if (m > ntree .and. m <= nbrdlf_dcd_brl_shrub ) then 
-            dgv_pftcon%allom1(m) = allom1s
-            dgv_pftcon%allom2(m) = allom2s
-         end if
-      end do
-   end if
+#ifdef CNDV
+   do m = 0,numpft
+      dgv_pftcon%crownarea_max(m) = pftpar20(m)
+      dgv_pftcon%tcmin(m) = pftpar28(m)
+      dgv_pftcon%tcmax(m) = pftpar29(m)
+      dgv_pftcon%gddmin(m) = pftpar30(m)
+      dgv_pftcon%twmax(m) = pftpar31(m)
+      dgv_pftcon%reinickerp(m) = reinickerp
+      dgv_pftcon%allom1(m) = allom1
+      dgv_pftcon%allom2(m) = allom2
+      dgv_pftcon%allom3(m) = allom3
+      ! modification for shrubs by X.D.Z
+      if (m > ntree .and. m <= nbrdlf_dcd_brl_shrub ) then 
+         dgv_pftcon%allom1(m) = allom1s
+         dgv_pftcon%allom2(m) = allom2s
+      end if
+   end do
+#endif
 
    ! --------------------------------------------------------------------
    ! Define layer structure for soil, lakes, urban walls and roof 
@@ -567,11 +639,20 @@ subroutine iniTimeConst
       ! Initialize restriction for min of soil potential (mm)
       smpmin(c) = -1.e8_r8
 
-      ! Decay factor (m)
-      hkdepth(c) = 1._r8/2.5_r8
+      ! Decay factors (m)
+      !hkdepth(c) = 1._r8/2.5_r8
+      hkdepth(c) = 1._r8/Fdrai(g)
+      fff_p(c) = Fover(g)
 
-      ! Maximum saturated fraction
+      ! Maximum saturated fraction, shape parameter
       wtfact(c) = gti(g)
+      cs_p(c) = Cs(g)
+
+      ! Maximum subsurface runoff
+      qdm_p(c) = Qdm(g)
+
+      ! specific yield
+      sy_p(c) = Sy(g)
 
       ! Soil color
       isoicol(c) = soic2d(g)
@@ -639,18 +720,32 @@ subroutine iniTimeConst
             end if
             ! Note that the following properties are overwritten for urban impervious road 
             ! layers that are not soil in SoilThermProp.F90 within SoilTemperatureMod.F90
-            watsat(c,lev) = 0.489_r8 - 0.00126_r8*sand
-            bsw(c,lev)    = 2.91 + 0.159*clay
-            sucsat(c,lev) = 10._r8 * ( 10._r8**(1.88_r8-0.0131_r8*sand) )
+            !watsat(c,lev) = 0.489_r8 - 0.00126_r8*sand
+            !bsw(c,lev)    = 2.91 + 0.159*clay
+            !sucsat(c,lev) = 10._r8 * ( 10._r8**(1.88_r8-0.0131_r8*sand) )
+            !for UQ
+            if (lev .le. nlevsoi) then
+               watsat(c,lev) = Thetas(g,lev)
+               bsw(c,lev)    = Bch(g,lev)
+               sucsat(c,lev) = Psis(g,lev)
+               bsw(c,lev)    = (1._r8-om_frac)*Bch(g,lev) + om_frac*om_b
+               xksat         = Ks(g,lev) ! mm/s
+            else
+               watsat(c,lev) = Thetas(g,nlevsoi)
+               bsw(c,lev)    = Bch(g,nlevsoi)
+               sucsat(c,lev) = Psis(g,nlevsoi)
+               bsw(c,lev)    = (1._r8-om_frac)*Bch(g,nlevsoi) + om_frac*om_b
+               xksat         = Ks(g,nlevsoi) ! mm/s
+            endif
             bd            = (1._r8-watsat(c,lev))*2.7e3_r8 
             watsat(c,lev) = (1._r8 - om_frac)*watsat(c,lev) + om_watsat*om_frac
             tkm           = (1._r8-om_frac)*(8.80_r8*sand+2.92_r8*clay)/(sand+clay)+om_tkm*om_frac ! W/(m K)
-            bsw(c,lev)    = (1._r8-om_frac)*(2.91_r8 + 0.159_r8*clay) + om_frac*om_b   
+            !bsw(c,lev)    = (1._r8-om_frac)*(2.91_r8 + 0.159_r8*clay) + om_frac*om_b   
             bsw2(c,lev)   = -(3.10_r8 + 0.157_r8*clay - 0.003_r8*sand)
             psisat(c,lev) = -(exp((1.54_r8 - 0.0095_r8*sand + 0.0063_r8*(100.0_r8-sand-clay))*log(10.0_r8))*9.8e-5_r8)
             vwcsat(c,lev) = (50.5_r8 - 0.142_r8*sand - 0.037_r8*clay)/100.0_r8
             sucsat(c,lev) = (1._r8-om_frac)*sucsat(c,lev) + om_sucsat*om_frac  
-            xksat         = 0.0070556 *( 10.**(-0.884+0.0153*sand) ) ! mm/s
+            !xksat         = 0.0070556 *( 10.**(-0.884+0.0153*sand) ) ! mm/s
 
             ! perc_frac is zero unless perf_frac greater than percolation threshold
             if (om_frac > pc) then
@@ -765,7 +860,7 @@ subroutine iniTimeConst
                                 + exp(-rootb_par(ivt(p)) * zi(c,nlevsoi-1)) )
          rootfr(p,nlevsoi+1:nlevgrnd) =  0.0_r8
 
-!if (use_cn) then
+!#if (defined CN)
 !        ! replacing the exponential rooting distribution
 !        ! with a linear decrease, going to zero at the bottom of the lowest
 !        ! soil layer for woody pfts, but going to zero at the bottom of
@@ -796,7 +891,7 @@ subroutine iniTimeConst
 !              end do
 !           end if
 !        end if
-! endif
+!#endif
       else
          rootfr(p,1:nlevsoi) = 0._r8
       endif
@@ -808,10 +903,10 @@ subroutine iniTimeConst
 
    end do ! end pft level initialization
    
-   if (use_cn) then
-      ! initialize the CN variables for special landunits, including lake points
-      call CNiniSpecial()
-   end if
+#if (defined CN)
+   ! initialize the CN variables for special landunits, including lake points
+   call CNiniSpecial()
+#endif
 
    deallocate(soic2d,sand3d,clay3d,gti,organic3d)
    deallocate(temp_ef,efisop2d)

@@ -21,7 +21,6 @@ module clm_driver
 !  -> dynland_hwcontent   Get initial heat, water content
 !     + pftdyn_interp                                                    [pftdyn]
 !     + dynland_hwcontent   Get new heat, water content                  [pftdyn]
-! ==== End Loop over clumps  ====
 !
 ! ==== Begin Loop over clumps ====
 !  -> clm_driverInit      save of variables from previous time step
@@ -60,7 +59,9 @@ module clm_driver
 !  -> SnowAge_grain       update snow effective grain size for snow radiative transfer
 !   + CNEcosystemDyn      Carbon Nitrogen model ecosystem dynamics:     [CN]
 !                         vegetation phenology and soil carbon  
-!   + EcosystemDyn        "static" ecosystem dynamics:                  [! CN ]
+!   + casa_ecosystemDyn   CASA Prime Carbon model ecosystem dynamics:   [CASA]
+!                         vegetation phenology and soil carbon  
+!   + EcosystemDyn        "static" ecosystem dynamics:                  [! CN or ! CASA]
 !                         vegetation phenology and soil carbon  
 !  -> BalanceCheck        check for errors in energy and water balances
 !  -> SurfaceAlbedo       albedos for next time step
@@ -70,6 +71,8 @@ module clm_driver
 ! Second phase of the clm main driver, for handling history and restart file output.
 !
 !  -> write_diagnostic    output diagnostic if appropriate
+!   + Rtmriverflux        calls RTM river routing model                [RTM]
+!   + inicPerp            initial snow and soil moisture               [is_perpetual]
 !  -> updateAccFlds       update accumulated fields
 !  -> hist_update_hbuf    accumulate history fields for time interval
 !  -> htapes_wrapup       write history tapes if appropriate
@@ -82,21 +85,26 @@ module clm_driver
 ! !USES:
   use shr_kind_mod        , only : r8 => shr_kind_r8
   use clmtype
-  use clm_varctl          , only : wrtdia, flanduse_timeseries, iulog, create_glacier_mec_landunit, &
-                                   use_cn, use_cndv, use_exit_spinup
+  use clm_varctl          , only : wrtdia, fpftdyn
+  use clm_varctl          , only : iulog
   use spmdMod             , only : masterproc,mpicom
   use decompMod           , only : get_proc_clumps, get_clump_bounds, get_proc_bounds
   use filterMod           , only : filter, setFilters
+#if (defined CNDV)
   use CNDVMod             , only : dv, histCNDV
   use pftdynMod           , only : pftwt_interp
+#endif
   use pftdynMod           , only : pftdyn_interp, pftdyn_wbal_init, pftdyn_wbal
+#ifdef CN
   use pftdynMod           , only : pftdyn_cnbal
+#endif
   use dynlandMod          , only : dynland_hwcontent
   use clm_varcon          , only : zlnd, isturb
-  use clm_time_manager    , only : get_step_size,get_curr_date,get_ref_date,get_nstep
-  use CropRestMod         , only : CropRestIncYear
+  use clm_time_manager    , only : get_step_size, get_curr_calday, &
+                                   get_curr_date, get_ref_date, get_nstep, is_perpetual
   use histFileMod         , only : hist_update_hbuf, hist_htapes_wrapup
   use restFileMod         , only : restFile_write, restFile_filename
+  use inicPerpMod         , only : inicPerp  
   use accFldsMod          , only : updateAccFlds
   use clm_driverInitMod   , only : clm_driverInit
   use BalanceCheckMod     , only : BeginWaterBalance, BalanceCheck
@@ -111,23 +119,31 @@ module clm_driver
   use BiogeophysicsLakeMod, only : BiogeophysicsLake
   use SurfaceAlbedoMod    , only : SurfaceAlbedo
   use pft2colMod          , only : pft2col
+#if (defined CN)
   use CNSetValueMod       , only : CNZeroFluxes_dwt
   use CNEcosystemDynMod   , only : CNEcosystemDyn
   use CNAnnualUpdateMod   , only : CNAnnualUpdate
   use CNBalanceCheckMod   , only : BeginCBalance, BeginNBalance, &
                                    CBalanceCheck, NBalanceCheck
   use ndepStreamMod       , only : ndep_interp
+#else
   use STATICEcosysDynMod  , only : EcosystemDyn
+#endif
   use DUSTMod             , only : DustDryDep, DustEmission
   use VOCEmissionMod      , only : VOCEmission
   use seq_drydep_mod      , only : n_drydep, drydep_method, DD_XLND
   use STATICEcosysDynMod  , only : interpMonthlyVeg
   use DryDepVelocity      , only : depvel_compute
+#if (defined CASA)
+  use CASAMod             , only : casa_ecosystemDyn
+#endif
+#if (defined RTM)
+  use RtmMod              , only : RtmInput, RtmMapl2r, Rtm
+#endif
   use abortutils          , only : endrun
   use UrbanMod            , only : UrbanAlbedo, UrbanRadiation, UrbanFluxes 
   use SNICARMod           , only : SnowAge_grain
   use clm_atmlnd          , only : clm_map2gcell
-  use clm_glclnd          , only : update_clm_s2x
   use perf_mod
 !
 ! !PUBLIC TYPES:
@@ -179,7 +195,6 @@ subroutine clm_drv(doalb, nextsw_cday, declinp1, declin, rstwr, nlend, rdate)
 ! 3/6/09, Peter Thornton: Added declin as new argument, for daylength control on Vcmax
 ! 2008.11.12  B. Kauffman: morph routine casa() in casa_ecosytemDyn(), so casa
 !    is more similar to CN & DGVM
-! 2/25/2012 M. Vertenstein: Removed CASA references 
 !
 !EOP
 !
@@ -205,6 +220,7 @@ subroutine clm_drv(doalb, nextsw_cday, declinp1, declin, rstwr, nlend, rdate)
   integer  :: begc_proc, endc_proc     ! proc beginning and ending column indices
   integer  :: begp_proc, endp_proc     ! proc beginning and ending pft indices
   type(column_type), pointer :: cptr   ! pointer to column derived subtype
+#if (defined CNDV)
   integer  :: yrp1                     ! year (0, ...) for nstep+1
   integer  :: monp1                    ! month (1, ..., 12) for nstep+1
   integer  :: dayp1                    ! day of month (1, ..., 31) for nstep+1
@@ -216,47 +232,46 @@ subroutine clm_drv(doalb, nextsw_cday, declinp1, declin, rstwr, nlend, rdate)
   integer  :: ncdate                   ! current date
   integer  :: nbdate                   ! base date (reference date)
   integer  :: kyr                      ! thousand years, equals 2 at end of first year
+#endif
   character(len=256) :: filer          ! restart file name
   integer :: ier                       ! error code
+  logical, save :: do_rtm              ! true => perform rtm calculation
 !-----------------------------------------------------------------------
 
   ! Assign local pointers to derived subtypes components (landunit-level)
 
-  itypelun            => lun%itype
+  itypelun            => clm3%g%l%itype
 
   ! Assign local pointers to derived subtypes components (column-level)
 
-  clandunit           => col%landunit
+  clandunit           => clm3%g%l%c%landunit
 
   ! Set pointers into derived type
 
-  cptr => col
+  cptr => clm3%g%l%c
 
-  ! Update time-related info
-
-  call CropRestIncYear()
-
-
-  if (use_cn) then
-     ! For dry-deposition need to call CLMSP so that mlaidiff is obtained
-     if ( n_drydep > 0 .and. drydep_method == DD_XLND ) then
-        call t_startf('interpMonthlyVeg')
-        call interpMonthlyVeg()
-        call t_stopf('interpMonthlyVeg')
-     endif
-  else
-     ! Determine weights for time interpolation of monthly vegetation data.
-     ! This also determines whether it is time to read new monthly vegetation and
-     ! obtain updated leaf area index [mlai1,mlai2], stem area index [msai1,msai2],
-     ! vegetation top [mhvt1,mhvt2] and vegetation bottom [mhvb1,mhvb2]. The
-     ! weights obtained here are used in subroutine ecosystemdyn to obtain time
-     ! interpolated values.
-     if (doalb .or. ( n_drydep > 0 .and. drydep_method == DD_XLND )) then
-        call t_startf('interpMonthlyVeg')
-        call interpMonthlyVeg()
-        call t_stopf('interpMonthlyVeg')
-     end if
+#ifdef CN
+  ! For dry-deposition need to call CLMSP so that mlaidiff is obtained
+  if ( n_drydep > 0 .and. drydep_method == DD_XLND ) then
+     call t_startf('interpMonthlyVeg')
+     call interpMonthlyVeg()
+     call t_stopf('interpMonthlyVeg')
+  endif
+#else
+  ! ============================================================================
+  ! Determine weights for time interpolation of monthly vegetation data.
+  ! This also determines whether it is time to read new monthly vegetation and
+  ! obtain updated leaf area index [mlai1,mlai2], stem area index [msai1,msai2],
+  ! vegetation top [mhvt1,mhvt2] and vegetation bottom [mhvb1,mhvb2]. The
+  ! weights obtained here are used in subroutine ecosystemdyn to obtain time
+  ! interpolated values.
+  ! ============================================================================
+  if (doalb .or. ( n_drydep > 0 .and. drydep_method == DD_XLND )) then
+     call t_startf('interpMonthlyVeg')
+     call interpMonthlyVeg()
+     call t_stopf('interpMonthlyVeg')
   end if
+#endif
 
   ! ============================================================================
   ! Loop over clumps
@@ -264,7 +279,7 @@ subroutine clm_drv(doalb, nextsw_cday, declinp1, declin, rstwr, nlend, rdate)
 
   nclumps = get_proc_clumps()
 
-  !$OMP PARALLEL DO PRIVATE (nc,g,begg,endg,begl,endl,begc,endc,begp,endp)
+!$OMP PARALLEL DO PRIVATE (nc,g,begg,endg,begl,endl,begc,endc,begp,endp)
   do nc = 1,nclumps
 
      ! ============================================================================
@@ -279,47 +294,47 @@ subroutine clm_drv(doalb, nextsw_cday, declinp1, declin, rstwr, nlend, rdate)
 
      ! initialize heat and water content and dynamic balance fields to zero
      do g = begg,endg
-        gwf%qflx_liq_dynbal(g) = 0._r8
-        gws%gc_liq2(g)         = 0._r8
-        gws%gc_liq1(g)         = 0._r8
-        gwf%qflx_ice_dynbal(g) = 0._r8
-        gws%gc_ice2(g)         = 0._r8 
-        gws%gc_ice1(g)         = 0._r8
-        gef%eflx_dynbal(g)     = 0._r8
-        ges%gc_heat2(g)        = 0._r8
-        ges%gc_heat1(g)        = 0._r8
+        clm3%g%gwf%qflx_liq_dynbal(g) = 0._r8
+        clm3%g%gws%gc_liq2(g)         = 0._r8
+        clm3%g%gws%gc_liq1(g)         = 0._r8
+        clm3%g%gwf%qflx_ice_dynbal(g) = 0._r8
+        clm3%g%gws%gc_ice2(g)         = 0._r8 
+        clm3%g%gws%gc_ice1(g)         = 0._r8
+        clm3%g%gef%eflx_dynbal(g)     = 0._r8
+        clm3%g%ges%gc_heat2(g)        = 0._r8
+        clm3%g%ges%gc_heat1(g)        = 0._r8
      enddo
 
      !--- get initial heat,water content ---
-      call dynland_hwcontent( begg, endg, gws%gc_liq1(begg:endg), &
-                              gws%gc_ice1(begg:endg), ges%gc_heat1(begg:endg) )
+      call dynland_hwcontent( begg, endg, clm3%g%gws%gc_liq1(begg:endg), &
+                              clm3%g%gws%gc_ice1(begg:endg), clm3%g%ges%gc_heat1(begg:endg) )
    end do
-   !$OMP END PARALLEL DO
+!$OMP END PARALLEL DO
 
-   if (.not. use_cndv) then
-      if (flanduse_timeseries /= ' ') then
-         call pftdyn_interp  ! change the pft weights
+#if (!defined CNDV)
+   if (fpftdyn /= ' ') then
+      call pftdyn_interp  ! change the pft weights
       
-         !$OMP PARALLEL DO PRIVATE (nc,g,begg,endg,begl,endl,begc,endc,begp,endp)
-         do nc = 1,nclumps
-            call get_clump_bounds(nc, begg, endg, begl, endl, begc, endc, begp, endp)
-            
-            !--- get new heat,water content: (new-old)/dt = flux into lnd model ---
-            call dynland_hwcontent( begg, endg, gws%gc_liq2(begg:endg), &
-                 gws%gc_ice2(begg:endg), ges%gc_heat2(begg:endg) )
-            dtime = get_step_size()
-            do g = begg,endg
-               gwf%qflx_liq_dynbal(g) = (gws%gc_liq2 (g) - gws%gc_liq1 (g))/dtime
-               gwf%qflx_ice_dynbal(g) = (gws%gc_ice2 (g) - gws%gc_ice1 (g))/dtime
-               gef%eflx_dynbal    (g) = (ges%gc_heat2(g) - ges%gc_heat1(g))/dtime
-            enddo
-         end do
-         !$OMP END PARALLEL DO
-      end if
+!$OMP PARALLEL DO PRIVATE (nc,g,begg,endg,begl,endl,begc,endc,begp,endp)
+      do nc = 1,nclumps
+         call get_clump_bounds(nc, begg, endg, begl, endl, begc, endc, begp, endp)
+
+         !--- get new heat,water content: (new-old)/dt = flux into lnd model ---
+         call dynland_hwcontent( begg, endg, clm3%g%gws%gc_liq2(begg:endg), &
+                                 clm3%g%gws%gc_ice2(begg:endg), clm3%g%ges%gc_heat2(begg:endg) )
+         dtime = get_step_size()
+         do g = begg,endg
+            clm3%g%gwf%qflx_liq_dynbal(g) = (clm3%g%gws%gc_liq2 (g) - clm3%g%gws%gc_liq1 (g))/dtime
+            clm3%g%gwf%qflx_ice_dynbal(g) = (clm3%g%gws%gc_ice2 (g) - clm3%g%gws%gc_ice1 (g))/dtime
+            clm3%g%gef%eflx_dynbal    (g) = (clm3%g%ges%gc_heat2(g) - clm3%g%ges%gc_heat1(g))/dtime
+         enddo
+      end do
+!$OMP END PARALLEL DO
    end if
+#endif
       
-   !$OMP PARALLEL DO PRIVATE (nc,g,begg,endg,begl,endl,begc,endc,begp,endp)
-   do nc = 1,nclumps
+!$OMP PARALLEL DO PRIVATE (nc,g,begg,endg,begl,endl,begc,endc,begp,endp)
+  do nc = 1,nclumps
      call get_clump_bounds(nc, begg, endg, begl, endl, begc, endc, begp, endp)
 
      ! ============================================================================
@@ -332,67 +347,66 @@ subroutine clm_drv(doalb, nextsw_cday, declinp1, declin, rstwr, nlend, rdate)
           filter(nc)%num_hydrologyc, filter(nc)%hydrologyc)
      call t_stopf('begwbal')
 
-     if (use_cn) then
-        call t_startf('begcnbal')
-        call BeginCBalance(begc, endc, filter(nc)%num_soilc, filter(nc)%soilc)
-        call BeginNBalance(begc, endc, filter(nc)%num_soilc, filter(nc)%soilc)
-        call t_stopf('begcnbal')
-     end if
+#if (defined CN)
+     call t_startf('begcnbal')
+     call BeginCBalance(begc, endc, filter(nc)%num_soilc, filter(nc)%soilc)
+     call BeginNBalance(begc, endc, filter(nc)%num_soilc, filter(nc)%soilc)
+     call t_stopf('begcnbal')
+#endif
 
   end do
-  !$OMP END PARALLEL DO
+!$OMP END PARALLEL DO
 
   ! ============================================================================
   ! Initialize h2ocan_loss to zero
   ! ============================================================================
-
   call t_startf('pftdynwts')
-
-  !$OMP PARALLEL DO PRIVATE (nc,begg,endg,begl,endl,begc,endc,begp,endp)
+!$OMP PARALLEL DO PRIVATE (nc,begg,endg,begl,endl,begc,endc,begp,endp)
   do nc = 1,nclumps
      call get_clump_bounds(nc, begg, endg, begl, endl, begc, endc, begp, endp)
      call pftdyn_wbal_init( begc, endc )
 
-     if (use_cndv) then
-        ! NOTE: Currently CNDV and flanduse_timeseries /= ' ' are incompatible
-        call CNZeroFluxes_dwt( begc, endc, begp, endp )
-        call pftwt_interp( begp, endp )
-        call pftdyn_wbal( begg, endg, begc, endc, begp, endp )
+#if (defined CNDV)
+     ! NOTE: Currently CNDV and fpftdyn /= ' ' are incompatible
+     call CNZeroFluxes_dwt( begc, endc, begp, endp )
+     call pftwt_interp( begp, endp )
+     call pftdyn_wbal( begg, endg, begc, endc, begp, endp )
+     call pftdyn_cnbal( begc, endc, begp, endp )
+     call setFilters(nc)
+#else
+     ! ============================================================================
+     ! Update weights and reset filters if dynamic land use
+     ! This needs to be done outside the clumps loop, but after BeginWaterBalance()
+     ! The call to CNZeroFluxes_dwt() is needed regardless of fpftdyn
+     ! ============================================================================
+
+#if (defined CN)
+     call CNZeroFluxes_dwt( begc, endc, begp, endp )
+#endif
+
+     if (fpftdyn /= ' ') then
+#if (defined CN)
         call pftdyn_cnbal( begc, endc, begp, endp )
+#endif
         call setFilters(nc)
-     else
-        ! ============================================================================
-        ! Update weights and reset filters if dynamic land use
-        ! This needs to be done outside the clumps loop, but after BeginWaterBalance()
-        ! The call to CNZeroFluxes_dwt() is needed regardless of flanduse_timeseries
-        ! ============================================================================
-        if (use_cn) then
-           call CNZeroFluxes_dwt( begc, endc, begp, endp )
-        end if
-        if (flanduse_timeseries /= ' ') then
-           if (use_cn) then
-              call pftdyn_cnbal( begc, endc, begp, endp )
-           end if
-           call setFilters(nc)
-        end if
      end if
-
+#endif
   end do
-  !$OMP END PARALLEL DO
+!$OMP END PARALLEL DO
 
 
-  if (use_cn) then
-     ! ============================================================================
-     ! Update dynamic N deposition field, on albedo timestep
-     ! currently being done outside clumps loop, but no reason why it couldn't be
-     ! re-written to go inside.
-     ! ============================================================================
-     ! PET: switching CN timestep
-     call ndep_interp()
-  end if
+#if (defined CN)
+  ! ============================================================================
+  ! Update dynamic N deposition field, on albedo timestep
+  ! currently being done outside clumps loop, but no reason why it couldn't be
+  ! re-written to go inside.
+  ! ============================================================================
+  ! PET: switching CN timestep
+  call ndep_interp()
+#endif
   call t_stopf('pftdynwts')
 
-  !$OMP PARALLEL DO PRIVATE (nc,l,c,begg,endg,begl,endl,begc,endc,begp,endp)
+!$OMP PARALLEL DO PRIVATE (nc,l,c,begg,endg,begl,endl,begc,endc,begp,endp)
   do nc = 1,nclumps
 
      ! ============================================================================
@@ -409,13 +423,9 @@ subroutine clm_drv(doalb, nextsw_cday, declinp1, declin, rstwr, nlend, rdate)
      ! snow accumulation exceeds 10 mm.
      ! ============================================================================
      
-     ! initialize intracellular CO2 (Pa) parameters each timestep for use in VOCEmission
-     pps%cisun(begp:endp) = -999._r8
-     pps%cisha(begp:endp) = -999._r8
-
      ! initialize declination for current timestep
      do c = begc,endc
-        cps%decl(c) = declin
+        clm3%g%l%c%cps%decl(c) = declin
      end do
      
      call t_startf('drvinit')
@@ -578,13 +588,13 @@ subroutine clm_drv(doalb, nextsw_cday, declinp1, declin, rstwr, nlend, rdate)
         l = clandunit(c)
         if (itypelun(l) == isturb) then
            ! Urban landunit use Bonan 1996 (LSM Technical Note)
-           cps%frac_sno(c) = min( cps%snowdp(c)/0.05_r8, 1._r8)
+           cptr%cps%frac_sno(c) = min( cptr%cps%snowdp(c)/0.05_r8, 1._r8)
         else
            ! snow cover fraction in Niu et al. 2007
-           cps%frac_sno(c) = 0.0_r8
-           if(cps%snowdp(c) .gt. 0.0_r8)  then
-             cps%frac_sno(c) = tanh(cps%snowdp(c)/(2.5_r8*zlnd* &
-               (min(800._r8,cws%h2osno(c)/cps%snowdp(c))/100._r8)**1._r8) )
+           cptr%cps%frac_sno(c) = 0.0_r8
+           if(cptr%cps%snowdp(c) .gt. 0.0_r8)  then
+             cptr%cps%frac_sno(c) = tanh(cptr%cps%snowdp(c)/(2.5_r8*zlnd* &
+               (min(800._r8,cptr%cws%h2osno(c)/cptr%cps%snowdp(c))/100._r8)**1._r8) )
            endif
         end if
      end do
@@ -603,24 +613,33 @@ subroutine clm_drv(doalb, nextsw_cday, declinp1, declin, rstwr, nlend, rdate)
      ! ============================================================================
      call t_startf('ecosysdyn')
 
-     if (use_cn) then
-        ! fully prognostic canopy structure and C-N biogeochemistry
-        ! - CNDV defined: prognostic biogeography; else prescribed
-        ! - crop model:   crop algorithms called from within CNEcosystemDyn
-        call CNEcosystemDyn(begc,endc,begp,endp,filter(nc)%num_soilc,&
-             filter(nc)%soilc, filter(nc)%num_soilp, &
-             filter(nc)%soilp, filter(nc)%num_pcropp, &
-             filter(nc)%pcropp, doalb)
-        call CNAnnualUpdate(begc,endc,begp,endp,filter(nc)%num_soilc,&
-             filter(nc)%soilc, filter(nc)%num_soilp, &
-             filter(nc)%soilp)
-     else
-        ! Prescribed biogeography,
-        ! prescribed canopy structure, some prognostic carbon fluxes
-        call EcosystemDyn(begp, endp, &
-                          filter(nc)%num_nolakep, filter(nc)%nolakep, &
-                          doalb)
-     end if
+#if (defined CN)
+     ! fully prognostic canopy structure and C-N biogeochemistry
+     ! - CNDV defined: prognostic biogeography; else prescribed
+     ! - crop model:   crop algorithms called from within CNEcosystemDyn
+     call CNEcosystemDyn(begc,endc,begp,endp,filter(nc)%num_soilc,&
+                  filter(nc)%soilc, filter(nc)%num_soilp, &
+                  filter(nc)%soilp, filter(nc)%num_pcropp, &
+                  filter(nc)%pcropp, doalb)
+     call CNAnnualUpdate(begc,endc,begp,endp,filter(nc)%num_soilc,&
+                  filter(nc)%soilc, filter(nc)%num_soilp, &
+                  filter(nc)%soilp)
+#elif (defined CASA)
+     ! Prescribed biogeography,
+     ! prescribed canopy structure, some prognostic carbon fluxes
+     call casa_ecosystemDyn(begc, endc, begp, endp, &
+               filter(nc)%num_soilc, filter(nc)%soilc, &
+               filter(nc)%num_soilp, filter(nc)%soilp, doalb)
+     call EcosystemDyn(begp, endp, &
+                       filter(nc)%num_nolakep, filter(nc)%nolakep, &
+                       doalb)
+#else
+     ! Prescribed biogeography,
+     ! prescribed canopy structure, some prognostic carbon fluxes
+     call EcosystemDyn(begp, endp, &
+                       filter(nc)%num_nolakep, filter(nc)%nolakep, &
+                       doalb)
+#endif
      call t_stopf('ecosysdyn')
 
      ! Dry Deposition of chemical tracers (Wesely (1998) parameterizaion)
@@ -634,21 +653,19 @@ subroutine clm_drv(doalb, nextsw_cday, declinp1, declin, rstwr, nlend, rdate)
      call BalanceCheck(begp, endp, begc, endc, begl, endl, begg, endg)
      call t_stopf('balchk')
 
-     if (use_exit_spinup) then
-        ! skip calls to C and N balance checking during EXIT_SPINUP
-        ! because the system is (intentionally) not conserving mass
-        ! on the first EXIT_SPINUP doalb timestep     
-     else
-        if (use_cn) then
-           nstep = get_nstep()
-           if (nstep > 2) then
-              call t_startf('cnbalchk')
-              call CBalanceCheck(begc, endc, filter(nc)%num_soilc, filter(nc)%soilc)
-              call NBalanceCheck(begc, endc, filter(nc)%num_soilc, filter(nc)%soilc)
-              call t_stopf('cnbalchk')
-           end if
-        end if
+#if (defined EXIT_SPINUP)
+     ! skip calls to C and N balance checking during EXIT_SPINUP
+     ! because the system is (intentionally) not conserving mass
+     ! on the first EXIT_SPINUP doalb timestep     
+#elif (defined CN)
+     nstep = get_nstep()
+     if (nstep > 2) then
+        call t_startf('cnbalchk')
+        call CBalanceCheck(begc, endc, filter(nc)%num_soilc, filter(nc)%soilc)
+        call NBalanceCheck(begc, endc, filter(nc)%num_soilc, filter(nc)%soilc)
+        call t_stopf('cnbalchk')
      end if
+#endif
 
      ! ============================================================================
      ! Determine albedos for next time step
@@ -682,7 +699,7 @@ subroutine clm_drv(doalb, nextsw_cday, declinp1, declin, rstwr, nlend, rdate)
      end if
 
   end do
-  !$OMP END PARALLEL DO
+!$OMP END PARALLEL DO
 
   ! ============================================================================
   ! Determine gridcell averaged properties to send to atm (l2as and l2af derived types)
@@ -693,16 +710,6 @@ subroutine clm_drv(doalb, nextsw_cday, declinp1, declin, rstwr, nlend, rdate)
   call t_stopf('clm_map2gcell')
 
   ! ============================================================================
-  ! Determine fields to send to glc
-  ! ============================================================================
-  
-  if (create_glacier_mec_landunit) then
-     call t_startf('create_s2x')
-     call update_clm_s2x(init=.false.)
-     call t_stopf('create_s2x')
-  end if
-
-  ! ============================================================================
   ! Write global average diagnostics to standard output
   ! ============================================================================
 
@@ -711,6 +718,35 @@ subroutine clm_drv(doalb, nextsw_cday, declinp1, declin, rstwr, nlend, rdate)
   call t_startf('wrtdiag')
   call write_diagnostic(wrtdia, nstep)
   call t_stopf('wrtdiag')
+
+#if (defined RTM)
+  ! ============================================================================
+  ! Route surface and subsurface runoff into rivers
+  ! ============================================================================
+
+  call mpi_barrier(mpicom,ier)
+  call t_startf('clmrtm')
+  call get_proc_bounds(begg_proc, endg_proc, begl_proc, endl_proc, &
+                       begc_proc, endc_proc, begp_proc, endp_proc)
+  call RtmInput(do_rtm, begg_proc, endg_proc, &
+                clm3%g%gwf%qflx_runoffg(begg_proc:endg_proc),&
+                clm3%g%gwf%qflx_snwcp_iceg(begg_proc:endg_proc))
+  if (do_rtm) then
+     call RtmMapl2r()
+     call Rtm()
+  end if
+  call t_stopf('clmrtm')
+#endif
+
+  ! ============================================================================
+  ! Read initial snow and soil moisture data at each time step
+  ! ============================================================================
+
+  call t_startf('inicperp')
+  if (is_perpetual()) then
+     call inicPerp()
+  end if
+  call t_stopf('inicperp')
 
   ! ============================================================================
   ! Update accumulators
@@ -733,40 +769,41 @@ subroutine clm_drv(doalb, nextsw_cday, declinp1, declin, rstwr, nlend, rdate)
   ! NOTE: monp1, dayp1, and secp1 correspond to nstep+1
   ! ============================================================================
 
-  if (use_cndv) then
-     call t_startf('d2dgvm')
-     dtime = get_step_size()
-     call get_curr_date(yrp1, monp1, dayp1, secp1, offset=int(dtime))
-     if (monp1==1 .and. dayp1==1 .and. secp1==dtime .and. nstep>0)  then
-        
-        ! Get date info.  kyr is used in lpj().  At end of first year, kyr = 2.
-        call get_curr_date(yr, mon, day, sec)
-        ncdate = yr*10000 + mon*100 + day
-        call get_ref_date(yr, mon, day, sec)
-        nbdate = yr*10000 + mon*100 + day
-        kyr = ncdate/10000 - nbdate/10000 + 1
-        
-        if (masterproc) write(iulog,*) 'End of year. CNDV called now: ncdate=', &
-             ncdate,' nbdate=',nbdate,' kyr=',kyr,' nstep=', nstep
-        
-        nclumps = get_proc_clumps()
-        
-        !$OMP PARALLEL DO PRIVATE (nc,begg,endg,begl,endl,begc,endc,begp,endp)
-        do nc = 1,nclumps
-           call get_clump_bounds(nc, begg, endg, begl, endl, begc, endc, begp, endp)
-           call dv(begg, endg, begp, endp,                  &
-                filter(nc)%num_natvegp, filter(nc)%natvegp, kyr)
-        end do
-        !$OMP END PARALLEL DO
-     end if
-     call t_stopf('d2dgvm')
+#if (defined CNDV)
+  call t_startf('d2dgvm')
+  dtime = get_step_size()
+  call get_curr_date(yrp1, monp1, dayp1, secp1, offset=int(dtime))
+  if (monp1==1 .and. dayp1==1 .and. secp1==dtime .and. nstep>0)  then
+
+     ! Get date info.  kyr is used in lpj().  At end of first year, kyr = 2.
+     call get_curr_date(yr, mon, day, sec)
+     ncdate = yr*10000 + mon*100 + day
+     call get_ref_date(yr, mon, day, sec)
+     nbdate = yr*10000 + mon*100 + day
+     kyr = ncdate/10000 - nbdate/10000 + 1
+
+     if (masterproc) write(iulog,*) 'End of year. CNDV called now: ncdate=', &
+                     ncdate,' nbdate=',nbdate,' kyr=',kyr,' nstep=', nstep
+
+     nclumps = get_proc_clumps()
+
+!$OMP PARALLEL DO PRIVATE (nc,begg,endg,begl,endl,begc,endc,begp,endp)
+     do nc = 1,nclumps
+        call get_clump_bounds(nc, begg, endg, begl, endl, begc, endc, begp, endp)
+        call dv(begg, endg, begp, endp,                  &
+           filter(nc)%num_natvegp, filter(nc)%natvegp, kyr)
+     end do
+!$OMP END PARALLEL DO
   end if
+  call t_stopf('d2dgvm')
+#endif
 
   ! ============================================================================
   ! Create history and write history tapes if appropriate
   ! ============================================================================
 
   call t_startf('clm_drv_io')
+#ifndef _NOIO
 
   call t_startf('clm_drv_io_htapes')
   call hist_htapes_wrapup( rstwr, nlend )
@@ -776,14 +813,14 @@ subroutine clm_drv(doalb, nextsw_cday, declinp1, declin, rstwr, nlend, rdate)
   ! Write to CNDV history buffer if appropriate
   ! ============================================================================
 
-  if (use_cndv) then
-     if (monp1==1 .and. dayp1==1 .and. secp1==dtime .and. nstep>0)  then
-        call t_startf('clm_drv_io_hdgvm')
-        call histCNDV()
-        if (masterproc) write(iulog,*) 'Annual CNDV calculations are complete'
-        call t_stopf('clm_drv_io_hdgvm')
-     end if
+#if (defined CNDV)
+  if (monp1==1 .and. dayp1==1 .and. secp1==dtime .and. nstep>0)  then
+     call t_startf('clm_drv_io_hdgvm')
+     call histCNDV()
+     if (masterproc) write(iulog,*) 'Annual CNDV calculations are complete'
+     call t_stopf('clm_drv_io_hdgvm')
   end if
+#endif
 
   ! ============================================================================
   ! Write restart/initial files if appropriate
@@ -796,6 +833,7 @@ subroutine clm_drv(doalb, nextsw_cday, declinp1, declin, rstwr, nlend, rdate)
      call t_stopf('clm_drv_io_wrest')
   end if
 
+#endif
   call t_stopf('clm_drv_io')
 
 end subroutine clm_drv

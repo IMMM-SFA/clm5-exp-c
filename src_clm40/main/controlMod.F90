@@ -16,16 +16,21 @@ module controlMod
 
 ! !USES:
   use shr_kind_mod , only : r8 => shr_kind_r8, SHR_KIND_CL
-  use clm_varpar   , only : maxpatch_pft, maxpatch_glcmec
-  use clm_varctl   , only : caseid, ctitle, nsrest, brnch_retain_casename, hostname, &
-                            model_version=>version,    &
-                            iulog, finidat, fsurdat, fatmlndfrc, &
-                            fatmtopo, flndtopo, flanduse_timeseries, fpftcon, nrevsn, &
-                            create_crop_landunit, allocate_all_vegpfts,   &
-                            co2_type, wrtdia, co2_ppmv, nsegspc,          &
-                            username, fsnowaging, fsnowoptics, fglcmask, &
-                            create_glacier_mec_landunit, glc_dyntopo, &
-                            use_c13, use_c14, use_cn, use_cndv, use_crop 
+  use clm_varpar   , only : maxpatch_pft
+  use clm_varctl   , only : caseid, ctitle, nsrest, brnch_retain_casename, hostname, model_version=>version,    &
+                            iulog, outnc_large_files, finidat, fsurdat, fatmgrid, fatmlndfrc,     &
+                            fatmtopo, flndtopo, fpftdyn, fpftcon, nrevsn,                   &
+                            create_crop_landunit, allocate_all_vegpfts, fget_archdev, &
+                            co2_type, wrtdia, co2_ppmv, nsegspc, pertlim,       &
+                            username, fsnowaging, fsnowoptics, fglcmask
+  use SurfaceAlbedoMod, only : albice
+#ifdef RTM
+  use clm_varctl   , only : frivinp_rtm, ice_runoff, rtm_nsteps
+#endif
+#ifdef CN
+  use CNAllocationMod, only : suplnitro
+#endif
+  use clm_varctl   , only : create_glacier_mec_landunit, glc_nec, glc_dyntopo, glc_smb, glc_topomax
   use spmdMod      , only : masterproc
   use decompMod    , only : clump_pproc
   use histFileMod  , only : max_tapes, max_namlen, &
@@ -39,9 +44,6 @@ module controlMod
   use shr_const_mod, only : SHR_CONST_CDAY
   use abortutils   , only : endrun
   use UrbanMod     , only : urban_hac, urban_traffic
-  use SurfaceAlbedoMod, only : albice
-  use CNAllocationMod , only : suplnitro
- 
 !
 ! !PUBLIC TYPES:
   implicit none
@@ -123,12 +125,14 @@ contains
 ! Initialize CLM run control information
 !
 ! !USES:
-    use clm_time_manager , only : set_timemgr_init, get_timemgr_defaults
+    use clm_time_manager , only : set_timemgr_init, is_perpetual, get_timemgr_defaults
+#if (defined CASA)
+    use CASAMod          , only : lnpp, lalloc, q10, spunup, fcpool
+#endif
     use fileutils        , only : getavu, relavu
     use shr_string_mod   , only : shr_string_getParentDir
-    use clm_varctl       , only : clmvarctl_init, clm_varctl_set, nsrBranch, nsrStartup, &
+    use clm_varctl       , only : clmvarctl_init, set_clmvarctl, nsrBranch, nsrStartup, &
                                   nsrContinue
-    use clm_cpl_indices  , only : glc_nec
 
     implicit none
 !
@@ -143,8 +147,6 @@ contains
     integer :: i,j,n                ! loop indices
     integer :: ierr                 ! error code
     integer :: unitn                ! unit for namelist file
-    integer :: dtime                ! Integer time-step
-    integer :: override_nsrest      ! If want to override the startup type sent from driver
     character(len=32) :: subname = 'control_init'  ! subroutine name
 !------------------------------------------------------------------------
 
@@ -152,22 +154,18 @@ contains
     ! Namelist Variables
     ! ----------------------------------------------------------------------
 
-    ! Time step
+    ! clm input datasets
+
+    integer :: dtime    ! Integer time-step
     namelist / clm_inparm/ &
 	 dtime	
 
-    ! CLM namelist settings
-
-    namelist /clm_inparm / &
-         fatmlndfrc, finidat, nrevsn
-
-    ! Input datasets
-
     namelist /clm_inparm/  &
-         fsurdat, fatmtopo, flndtopo, &
-         fpftcon, flanduse_timeseries,  fsnowoptics, fsnowaging
+         finidat, fsurdat, fatmgrid, fatmlndfrc, fatmtopo, flndtopo, &
+         fpftcon, fpftdyn, nrevsn, &
+         fsnowoptics, fsnowaging, fglcmask
 
-    ! History, restart options
+    ! clm history, restart options
 
     namelist /clm_inparm/  &
          hist_empty_htapes, hist_dov2xy, &
@@ -176,29 +174,41 @@ contains
          hist_fincl1,  hist_fincl2, hist_fincl3, &
          hist_fincl4,  hist_fincl5, hist_fincl6, &
          hist_fexcl1,  hist_fexcl2, hist_fexcl3, &
-         hist_fexcl4,  hist_fexcl5, hist_fexcl6
+         hist_fexcl4,  hist_fexcl5, hist_fexcl6, &
+         outnc_large_files
 
-    ! BGC info
+    ! clm bgc info
 
+#if (defined CASA)
+    namelist /clm_inparm/  &
+         lnpp, lalloc, q10, spunup, fcpool
+#endif
+
+#ifdef CN
     namelist /clm_inparm/  &
          suplnitro
-
-    namelist /clm_inparm / use_c13, use_c14
+#endif
 
     namelist /clm_inparm / &
          co2_type
 
-    ! Glacier_mec info
+    ! River runoff
+#ifdef RTM
+    namelist /clm_inparm / ice_runoff, frivinp_rtm, rtm_nsteps
+#endif
+
+     ! clm glacier_mec info
     namelist /clm_inparm / &    
-         maxpatch_glcmec, glc_dyntopo, fglcmask 
+         create_glacier_mec_landunit, glc_dyntopo, glc_smb
 
-    ! Other options
+    ! clm other options
 
+    integer :: override_nsrest   ! If want to override the startup type sent from driver
     namelist /clm_inparm/  &
-         clump_pproc, wrtdia, &
+         clump_pproc, wrtdia, pertlim, &
          create_crop_landunit, nsegspc, co2_ppmv, override_nsrest, &
          albice
-    ! Urban options
+    ! clm urban options
 
     namelist /clm_inparm/  &
          urban_hac, urban_traffic
@@ -215,6 +225,14 @@ contains
     runtyp(nsrStartup  + 1) = 'initial'
     runtyp(nsrContinue + 1) = 'restart'
     runtyp(nsrBranch   + 1) = 'branch '
+
+#if (defined CASA)
+    lnpp = 2
+    lalloc = 1
+    q10 = 2.0_r8          ! set Q10 to 2.0  03/11/19
+    spunup = 0
+    fcpool = ' '
+#endif
 
     ! Set clumps per procoessor
 
@@ -242,7 +260,7 @@ contains
        do while ( ierr /= 0 )
           read(unitn, clm_inparm, iostat=ierr)
           if (ierr < 0) then
-             call endrun( subname//' encountered end-of-file on clm_inparm read' )
+             call endrun( subname//' encountered end-of-file on namelist read' )
           endif
        end do
        call relavu( unitn )
@@ -252,6 +270,19 @@ contains
        ! ----------------------------------------------------------------------
 
        call set_timemgr_init( dtime_in=dtime )
+
+#if (defined RTM) || (defined CNDV)
+       if (is_perpetual()) then
+          write(iulog,*)'RTM or CNDV cannot be defined in perpetual mode'
+          call endrun()
+       end if
+#endif
+       if (is_perpetual()) then
+          if (finidat == ' ') then
+             write(iulog,*)'must specify initial dataset for perpetual mode'
+             call endrun()
+          end if
+       end if
 
        if (urban_traffic) then
           write(iulog,*)'Urban traffic fluxes are not implemented currently'
@@ -271,24 +302,14 @@ contains
        ! Override start-type (can only override to branch (3)  and only 
        ! if the driver is a startup type
        if ( override_nsrest /= nsrest )then
+
            if ( override_nsrest /= nsrBranch .and. nsrest /= nsrStartup )then
               call endrun( subname//' ERROR: can ONLY override clm start-type ' // &
                            'to branch type and ONLY if driver is a startup type' )
            end if
-           call clm_varctl_set( nsrest_in=override_nsrest )
-       end if
-       
-       ! Consistency of elevation classes on namelist to what's sent by the coupler
-       if (glc_nec /= maxpatch_glcmec ) then
-          write(iulog,*)'glc_nec, maxpatch_glcmec=',glc_nec, maxpatch_glcmec
-          write(iulog,*)'Number of glacier elevation classes from clm namelist and' // &
-                        ' sent by the coupler MUST be equal'
-          call endrun( subname //' ERROR: glc_nec and maxpatch_glcmec must be equal')  
-       end if
-       if (maxpatch_glcmec > 0) then
-          create_glacier_mec_landunit = .true.
-       else
-          create_glacier_mec_landunit = .false.
+
+           call set_clmvarctl( nsrest_in=override_nsrest )
+
        end if
        
     endif   ! end of if-masterproc if-block
@@ -326,6 +347,9 @@ contains
 !
 ! !USES:
 !
+#if (defined CASA)
+    use CASAMod,    only : lnpp, lalloc, q10, spunup
+#endif
     use spmdMod,    only : mpicom, MPI_CHARACTER, MPI_INTEGER, MPI_LOGICAL, MPI_REAL8
     use clm_varctl, only : single_column, scmlat, scmlon, rpntfil
 !
@@ -355,13 +379,23 @@ contains
     call mpi_bcast (nrevsn  , len(nrevsn)  , MPI_CHARACTER, 0, mpicom, ier)
     call mpi_bcast (finidat , len(finidat) , MPI_CHARACTER, 0, mpicom, ier)
     call mpi_bcast (fsurdat , len(fsurdat) , MPI_CHARACTER, 0, mpicom, ier)
+    call mpi_bcast (fatmgrid, len(fatmgrid), MPI_CHARACTER, 0, mpicom, ier)
     call mpi_bcast (fatmlndfrc,len(fatmlndfrc),MPI_CHARACTER, 0, mpicom, ier)
     call mpi_bcast (fatmtopo, len(fatmtopo) ,MPI_CHARACTER, 0, mpicom, ier)
     call mpi_bcast (flndtopo, len(flndtopo) ,MPI_CHARACTER, 0, mpicom, ier)
     call mpi_bcast (fpftcon , len(fpftcon) , MPI_CHARACTER, 0, mpicom, ier)
-    call mpi_bcast (flanduse_timeseries , len(flanduse_timeseries) , MPI_CHARACTER, 0, mpicom, ier)
+    call mpi_bcast (fpftdyn , len(fpftdyn) , MPI_CHARACTER, 0, mpicom, ier)
     call mpi_bcast (fsnowoptics,  len(fsnowoptics),  MPI_CHARACTER, 0, mpicom, ier)
     call mpi_bcast (fsnowaging,   len(fsnowaging),   MPI_CHARACTER, 0, mpicom, ier)
+    call mpi_bcast (fglcmask,     len(fglcmask),     MPI_CHARACTER, 0, mpicom, ier)
+    call mpi_bcast (fget_archdev, len(fget_archdev), MPI_CHARACTER, 0, mpicom, ier)
+
+    ! River runoff dataset and control flag
+#if (defined RTM)
+    call mpi_bcast (frivinp_rtm, len(frivinp_rtm), MPI_CHARACTER, 0, mpicom, ier)
+    call mpi_bcast (ice_runoff,  1,                MPI_LOGICAL,   0, mpicom, ier)
+    call mpi_bcast (rtm_nsteps,  1,                MPI_INTEGER,   0, mpicom, ier)
+#endif
 
     ! Landunit generation
 
@@ -371,14 +405,9 @@ contains
     ! BGC
 
     call mpi_bcast (co2_type, len(co2_type), MPI_CHARACTER, 0, mpicom, ier)
-    if (use_cn) then
-       call mpi_bcast (suplnitro, len(suplnitro), MPI_CHARACTER, 0, mpicom, ier)
-    end if
-
-    ! isotopes
-
-    call mpi_bcast (use_c13,          1, MPI_LOGICAL,     0, mpicom, ier)
-    call mpi_bcast (use_c14,          1, MPI_LOGICAL,     0, mpicom, ier)
+#ifdef CN
+    call mpi_bcast (suplnitro, len(suplnitro), MPI_CHARACTER, 0, mpicom, ier)
+#endif
 
     ! physics variables
 
@@ -393,14 +422,15 @@ contains
     call mpi_bcast (albice      , 2, MPI_REAL8,   0, mpicom, ier)
 
     ! glacier_mec variables
-
-    call mpi_bcast (create_glacier_mec_landunit, 1, MPI_LOGICAL  , 0, mpicom, ier)
-    call mpi_bcast (maxpatch_glcmec             ,1, MPI_INTEGER  , 0, mpicom, ier)
-    call mpi_bcast (glc_dyntopo,                 1, MPI_LOGICAL  , 0, mpicom, ier)
-    call mpi_bcast (fglcmask,        len(fglcmask), MPI_CHARACTER, 0, mpicom, ier)
+    call mpi_bcast (create_glacier_mec_landunit, 1, MPI_LOGICAL, 0, mpicom, ier)
+    call mpi_bcast (glc_nec,                     1, MPI_INTEGER, 0, mpicom, ier)
+    call mpi_bcast (glc_dyntopo,                 1, MPI_LOGICAL, 0, mpicom, ier)
+    call mpi_bcast (glc_smb,                     1, MPI_LOGICAL, 0, mpicom, ier)
+    call mpi_bcast (glc_topomax, size(glc_topomax), MPI_REAL8,   0, mpicom, ier) 
 
     ! history file variables
 
+    call mpi_bcast (outnc_large_files, 1, MPI_LOGICAL, 0, mpicom, ier)
     call mpi_bcast (hist_empty_htapes, 1, MPI_LOGICAL, 0, mpicom, ier)
     call mpi_bcast (hist_dov2xy, size(hist_dov2xy), MPI_LOGICAL, 0, mpicom, ier)
     call mpi_bcast (hist_nhtfrq, size(hist_nhtfrq), MPI_INTEGER, 0, mpicom, ier)
@@ -429,6 +459,16 @@ contains
 
     call mpi_bcast (clump_pproc, 1, MPI_INTEGER, 0, mpicom, ier)
 
+    ! error growth perturbation limit
+    call mpi_bcast (pertlim, 1, MPI_REAL8, 0, mpicom, ier)
+
+#if (defined CASA)
+    call mpi_bcast (lnpp  , 1, MPI_INTEGER, 0, mpicom, ier)
+    call mpi_bcast (lalloc, 1, MPI_INTEGER, 0, mpicom, ier)
+    call mpi_bcast (spunup, 1, MPI_INTEGER, 0, mpicom, ier)
+    call mpi_bcast (q10   , 1, MPI_REAL8  , 0, mpicom, ier)
+#endif
+
   end subroutine control_spmd
 
 !------------------------------------------------------------------------
@@ -446,8 +486,12 @@ contains
 !
     use clm_varctl,      only : source, rpntdir, rpntfil, nsrStartup, nsrBranch, &
                                 nsrContinue
+#ifdef CN
     use CNAllocationMod, only : suplnitro, suplnNon
-!
+#endif
+#ifdef RTM
+    use clm_varctl,      only : ice_runoff
+#endif
 ! !ARGUMENTS:
     implicit none
 !
@@ -458,7 +502,6 @@ contains
 ! !LOCAL VARIABLES:
 !EOP
     integer i  !loop index
-    character(len=32) :: subname = 'control_print'  ! subroutine name
 !------------------------------------------------------------------------
 
     write(iulog,*) 'define run:'
@@ -475,29 +518,36 @@ contains
     else
        write(iulog,*) '   surface data   = ',trim(fsurdat)
     end if
-    if (fatmlndfrc == ' ') then
-       write(iulog,*) '   fatmlndfrc not set, setting frac/mask to 1'
-    else
-       write(iulog,*) '   land frac data = ',trim(fatmlndfrc)
-    end if
     if (flndtopo == ' ') then
        write(iulog,*) '   flndtopo not set'
     else
        write(iulog,*) '   land topographic data = ',trim(flndtopo)
+    end if
+    if (fatmgrid == ' ') then
+       write(iulog,*) '   fatmgrid not set, using fsurdat'
+       fatmgrid = fsurdat
+       write(iulog,*) '   atm grid data  = ',trim(fatmgrid)
+    else
+       write(iulog,*) '   atm grid data  = ',trim(fatmgrid)
+    end if
+    if (fatmlndfrc == ' ') then
+       write(iulog,*) '   fatmlndfrc not set, using fatmgrid'
+       fatmlndfrc = fatmgrid
+       write(iulog,*) '   land frac data = ',trim(fatmlndfrc)
+    else
+       write(iulog,*) '   land frac data = ',trim(fatmlndfrc)
     end if
     if (fatmtopo == ' ') then
        write(iulog,*) '   fatmtopo not set'
     else
        write(iulog,*) '   atm topographic data = ',trim(fatmtopo)
     end if
-    if (use_cn) then
-       if (suplnitro /= suplnNon)then
-          write(iulog,*) '   Supplemental Nitrogen mode is set to run over PFTs: ', &
-               trim(suplnitro)
-       end if
-       write(iulog, *)    '   use_c13: ', use_c13
-       write(iulog, *)    '   use_c14: ', use_c14
+#ifdef CN
+    if (suplnitro /= suplnNon)then
+        write(iulog,*) '   Supplemental Nitrogen mode is set to run over PFTs: ', &
+                       trim(suplnitro)
     end if
+#endif
     if (fsnowoptics == ' ') then
        write(iulog,*) '   snow optical properties file NOT set'
     else
@@ -508,14 +558,23 @@ contains
     else
        write(iulog,*) '   snow aging parameters file = ',trim(fsnowaging)
     endif
+    if (fglcmask == ' ') then
+       write(iulog,*) '   glacier mask file NOT set'
+    else
+       write(iulog,*) '   glacier mask file = ',trim(fglcmask)
+    endif
 
     if (create_glacier_mec_landunit) then
-       write(iulog,*) '   glc number of elevation classes =', maxpatch_glcmec
-       write(iulog,*) '   glc glacier mask file = ',trim(fglcmask)
+       write(iulog,*) '   number of elevation classes =', glc_nec
        if (glc_dyntopo) then
-          write(iulog,*) '   glc CLM glacier topography will evolve dynamically'
+          write(iulog,*) '   CLM glacier topography will evolve dynamically'
        else
-          write(iulog,*) '   glc CLM glacier topography will NOT evolve dynamically'
+          write(iulog,*) '   CLM glacier topography will NOT evolve dynamically'
+       endif
+       if (glc_smb) then
+          write(iulog,*) '   Surface mass balance will be passed to ice sheet model'
+       else
+          write(iulog,*) '   Positive-degree-day info will be passed to ice sheet model'
        endif
     endif
 
@@ -523,20 +582,40 @@ contains
     if (nsrest == nsrStartup .and. finidat /= ' ') write(iulog,*) '   initial data   = ',trim(finidat)
     if (nsrest /= nsrStartup) write(iulog,*) '   restart data   = ',trim(nrevsn)
     write(iulog,*) '   atmospheric forcing data is from cesm atm model'
+#if (defined RTM)
+    if (frivinp_rtm /= ' ') write(iulog,*) '   RTM river data       = ',trim(frivinp_rtm)
+#endif
     write(iulog,*) 'Restart parameters:'
     write(iulog,*)'   restart pointer file directory     = ',trim(rpntdir)
     write(iulog,*)'   restart pointer file name          = ',trim(rpntfil)
-    write(iulog,*) 'model physics parameters:'
-
-    if ( trim(co2_type) == 'constant' )then
-       write(iulog,*) '   CO2 volume mixing ratio   (umol/mol)   = ', co2_ppmv
-    else
-       write(iulog,*) '   CO2 volume mixing ratio                = ', co2_type
+    if ( outnc_large_files ) then
+       write(iulog,*)'Large file support for output files is ON'
     end if
-
+    if ( trim(fget_archdev) /= "null:" ) then
+       write(iulog,*)'try to retreive input files that do NOT exist from archival device: ', trim(fget_archdev)
+    end if
+    write(iulog,*) 'model physics parameters:'
+#if (defined PERGRO)
+    write(iulog,*) '   flag for random perturbation test is set'
+#else
+    write(iulog,*) '   flag for random perturbation test is not set'
+#endif
+    write(iulog,*) '   CO2 volume mixing ratio   (umol/mol)   = ', co2_ppmv
     write(iulog,*) '   land-ice albedos      (unitless 0-1)   = ', albice
     write(iulog,*) '   urban air conditioning/heating and wasteheat   = ', urban_hac
     write(iulog,*) '   urban traffic flux   = ', urban_traffic
+#if (defined RTM)
+    if (rtm_nsteps > 1) then
+       write(iulog,*)'river runoff calculation performed only every ',rtm_nsteps,' nsteps'
+    else
+       write(iulog,*)'river runoff calculation performed every time step'
+    endif
+    if ( ice_runoff ) then
+       write(iulog,*)'Snow capping will flow out in frozen river runoff'
+    else
+       write(iulog,*)'Snow capping will flow out in liquid river runoff'
+    endif
+#endif
     if (nsrest == nsrContinue) then
        write(iulog,*) 'restart warning:'
        write(iulog,*) '   Namelist not checked for agreement with initial run.'
@@ -547,6 +626,8 @@ contains
        write(iulog,*) '   Namelist not checked for agreement with initial run.'
        write(iulog,*) '   Surface data set and reference date should not differ from initial run'
     end if
+    if ( pertlim /= 0.0_r8 ) &
+    write(iulog,*) '   perturbation limit = ',pertlim
     write(iulog,*) '   maxpatch_pft         = ',maxpatch_pft
     write(iulog,*) '   allocate_all_vegpfts = ',allocate_all_vegpfts
     write(iulog,*) '   nsegspc              = ',nsegspc

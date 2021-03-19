@@ -18,12 +18,8 @@ module spmdMod
   use shr_kind_mod, only: r8 => shr_kind_r8
   use clm_varctl  , only: iulog
   implicit none
-
-  private
-
-#include <mpif.h>
-
   save
+  private
 
   ! Default settings valid even if there is no spmd 
 
@@ -54,6 +50,8 @@ module spmdMod
   public :: MPI_COMM_WORLD
   public :: MPI_MAX_PROCESSOR_NAME
 
+#include <mpif.h>  
+
 contains
 
 !-----------------------------------------------------------------------
@@ -62,7 +60,7 @@ contains
 ! !IROUTINE: spmd_init( clm_mpicom )
 !
 ! !INTERFACE:
-  subroutine spmd_init( clm_mpicom, LNDID )
+  subroutine spmd_init( clm_mpicom )
 !
 ! !DESCRIPTION:
 ! MPI initialization (number of cpus, processes, tids, etc)
@@ -72,7 +70,6 @@ contains
 ! !ARGUMENTS:
     implicit none
     integer, intent(in) :: clm_mpicom
-    integer, intent(in) :: LNDID
 !
 ! !REVISION HISTORY:
 ! Author: Mariana Vertenstein
@@ -94,7 +91,7 @@ contains
 
     mpicom = clm_mpicom
 
-    comp_id = LNDID
+    comp_id = 1
 
     ! Get my processor id
 

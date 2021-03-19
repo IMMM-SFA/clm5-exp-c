@@ -12,7 +12,7 @@ contains
 
     use shr_kind_mod , only : r8 => shr_kind_r8
     use clmtype
-    use ncdio_pio        , only : file_desc_t, ncd_io, ncd_defvar, ncd_int, ncd_double
+    use ncdio_pio           
     use decompMod        , only : get_proc_bounds, ldecomp
     use domainMod        , only : ldomain
     use clm_time_manager , only : get_curr_date
@@ -56,10 +56,10 @@ contains
 
     ! Set pointers into derived type
 
-    gptr => grc
-    lptr => lun
-    cptr => col
-    pptr => pft
+    gptr => clm3%g
+    lptr => clm3%g%l
+    cptr => clm3%g%l%c
+    pptr => clm3%g%l%c%p
 
     ! Get relevant sizes
 

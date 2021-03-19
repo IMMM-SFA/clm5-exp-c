@@ -113,28 +113,28 @@ contains
 
    ! Set pointers into derived type
 
-   gptr => grc
-   lptr => lun
-   cptr => col
-   pptr => pft
+   gptr => clm3%g
+   lptr => clm3%g%l
+   cptr => clm3%g%l%c
+   pptr => clm3%g%l%c%p
 
-   ltype => lun%itype
-   ctype => col%itype
-   ptype => pft%itype
+   ltype => clm3%g%l%itype
+   ctype => clm3%g%l%c%itype
+   ptype => clm3%g%l%c%p%itype
 
-   nlev_improad => lps%nlev_improad
-   cv_wall      => lps%cv_wall
-   cv_roof      => lps%cv_roof
-   cv_improad   => lps%cv_improad
+   nlev_improad => clm3%g%l%lps%nlev_improad
+   cv_wall      => clm3%g%l%lps%cv_wall
+   cv_roof      => clm3%g%l%lps%cv_roof
+   cv_improad   => clm3%g%l%lps%cv_improad
 
-   snl          => cps%snl
-   watsat       => cps%watsat
-   csol         => cps%csol
-   dz           => cps%dz
-   t_soisno     => ces%t_soisno
-   h2osoi_liq   => cws%h2osoi_liq
-   h2osoi_ice   => cws%h2osoi_ice
-   h2osno       => cws%h2osno
+   snl          => clm3%g%l%c%cps%snl
+   watsat       => clm3%g%l%c%cps%watsat
+   csol         => clm3%g%l%c%cps%csol
+   dz           => clm3%g%l%c%cps%dz
+   t_soisno     => clm3%g%l%c%ces%t_soisno
+   h2osoi_liq   => clm3%g%l%c%cws%h2osoi_liq
+   h2osoi_ice   => clm3%g%l%c%cws%h2osoi_ice
+   h2osno       => clm3%g%l%c%cws%h2osno
 
    ! Get relevant sizes
 
@@ -167,11 +167,11 @@ contains
 
                if ( snl(c) < 0 ) then
                   do k = snl(c)+1,0 ! loop over snow layers
-                     liq   = liq   + cws%h2osoi_liq(c,k)
-                     ice   = ice   + cws%h2osoi_ice(c,k)
+                     liq   = liq   + clm3%g%l%c%cws%h2osoi_liq(c,k)
+                     ice   = ice   + clm3%g%l%c%cws%h2osoi_ice(c,k)
                   end do
                else                 ! no snow layers exist
-                  ice = ice + cws%h2osno(c)
+                  ice = ice + cptr%cws%h2osno(c)
                end if
             end if
 
@@ -182,8 +182,8 @@ contains
             .or. (ltype(l) == istice_mec                               )  &           
             .or. (ltype(l) == isturb .and. ctype(c) == icol_road_perv  )) then
                do k = 1,nlevgrnd
-                  liq   = liq   + cws%h2osoi_liq(c,k)
-                  ice   = ice   + cws%h2osoi_ice(c,k)
+                  liq   = liq   + cptr%cws%h2osoi_liq(c,k)
+                  ice   = ice   + cptr%cws%h2osoi_ice(c,k)
                end do
             end if
 
@@ -193,7 +193,7 @@ contains
             .or. (ltype(l) == istice                                   )  &
             .or. (ltype(l) == istice_mec                               )  &           
             .or. (ltype(l) == isturb .and. ctype(c) == icol_road_perv  )) then
-               liq = liq + cws%wa(c)
+               liq = liq + cptr%cws%wa(c)
             end if
 
             !--- water in canopy (at pft level) ---
@@ -202,7 +202,7 @@ contains
                pf = cptr%pftf(c)
                do p = pi,pf ! loop over pfts
                   wtcol = pptr%wtcol(p)
-                  liq = liq + pws%h2ocan(p) * wtcol
+                  liq = liq + pptr%pws%h2ocan(p) * wtcol
                end do
             end if
 

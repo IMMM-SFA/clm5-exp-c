@@ -20,31 +20,29 @@ module ndepStreamMod
   use mct_mod
 
   use spmdMod     , only: mpicom, masterproc, comp_id, iam
+  use clm_varpar  , only: lsmlon, lsmlat
   use clm_varctl  , only: iulog
   use controlMod  , only: NLFilename
   use abortutils  , only: endrun
   use fileutils   , only: getavu, relavu
-  use decompMod   , only: get_proc_bounds, ldecomp, gsmap_lnd_gdc2glo 
-  use domainMod   , only: ldomain
+  use decompMod   , only : get_proc_bounds, ldecomp, gsmap_lnd_gdc2glo 
 
 ! !PUBLIC TYPES:
   implicit none
-  private
+  integer, public :: stream_year_first_ndep   ! first year in stream to use
+  integer, public :: stream_year_last_ndep    ! last year in stream to use
+  integer, public :: model_year_align_ndep    ! align stream_year_firstndep with 
   save
 
 ! !PUBLIC MEMBER FUNCTIONS:
-  public :: ndep_init      ! position datasets for dynamic ndep
-  public :: ndep_interp    ! interpolates between two years of ndep file data
-  public :: clm_domain_mct ! Sets up MCT domain for this resolution
+  public :: ndep_init   ! position datasets for dynamic ndep
+  public :: ndep_interp ! interpolates between two years of ndep file data
 !
 !EOP
 
 ! ! PRIVATE TYPES
 
   type(shr_strdata_type)  :: sdat         ! input data stream
-  integer :: stream_year_first_ndep       ! first year in stream to use
-  integer :: stream_year_last_ndep        ! last year in stream to use
-  integer :: model_year_align_ndep        ! align stream_year_firstndep with 
 
 !=======================================================================
 contains
@@ -56,11 +54,9 @@ contains
    ! Initialize data stream information.  
    !----------------------------------------------------------------------- 
    ! Uses:
-   use clm_varctl       , only : inst_name
-   use clm_time_manager , only : get_calendar
-   use ncdio_pio        , only : pio_subsystem
-   use shr_pio_mod      , only : shr_pio_getiotype
-   use shr_nl_mod       , only : shr_nl_find_group_name
+   use clm_time_manager, only : get_calendar
+   use ncdio_pio       , only : pio_subsystem
+   use seq_io_mod      , only : seq_io_getiotype
    ! arguments
    implicit none
 
@@ -92,15 +88,21 @@ contains
    if (masterproc) then
       nu_nml = getavu()
       open( nu_nml, file=trim(NLFilename), status='old', iostat=nml_error )
-      call shr_nl_find_group_name(nu_nml, 'ndepdyn_nml', status=nml_error)
-      if (nml_error == 0) then
+      if (nml_error /= 0) then
+         nml_error = -1
+      else
+         nml_error =  1
+      endif
+      do while (nml_error > 0)
          read(nu_nml, nml=ndepdyn_nml,iostat=nml_error)
-         if (nml_error /= 0) then
-            call endrun(subname // ':: ERROR reading ndepdyn_nml namelist')
-         end if
-      end if
-      close(nu_nml)
+         if (nml_error > 0) read(nu_nml,*)  ! for Nagware compiler
+      end do
+      if (nml_error == 0) close(nu_nml)
       call relavu( nu_nml )
+   endif
+   call shr_mpi_bcast(nml_error, mpicom)
+   if (nml_error /= 0) then
+      call endrun ('Namelist read error in ndepStreamMod')
    endif
 
    call shr_mpi_bcast(stream_year_first_ndep, mpicom)
@@ -122,10 +124,10 @@ contains
 
    call shr_strdata_create(sdat,name="clmndep",    &
         pio_subsystem=pio_subsystem,               & 
-        pio_iotype=shr_pio_getiotype(inst_name),   &
+        pio_iotype=seq_io_getiotype('LND'),        &
         mpicom=mpicom, compid=comp_id,             &
         gsmap=gsmap_lnd_gdc2glo, ggrid=dom_clm,    &
-        nxg=ldomain%ni, nyg=ldomain%nj,            &
+        nxg=lsmlon, nyg=lsmlat,                    &
         yearFirst=stream_year_first_ndep,          &
         yearLast=stream_year_last_ndep,            &
         yearAlign=model_year_align_ndep,           &

@@ -9,12 +9,11 @@ module clmtypeInitMod
 ! Allocate clmtype components and initialize them to signaling NaN.
 !
 ! !USES:
-  use shr_kind_mod  , only : r8 => shr_kind_r8
-  use shr_infnan_mod, only : nan => shr_infnan_nan, assignment(=)
+  use shr_kind_mod, only : r8 => shr_kind_r8
+  use nanMod      , only : nan, bigint
   use clmtype
-  use clm_varpar    , only : maxpatch_pft, nlevsno, nlevgrnd, numrad, nlevlak, &
-                             numpft, ndst, nlevurb, nlevsoi
-  use clm_varctl  , only : use_c13, use_cn, use_cndv, use_crop
+  use clm_varpar  , only : maxpatch_pft, nlevsno, nlevgrnd, numrad, nlevlak, &
+                           numpft, ndst, nvoc, nlevurb, nlevsoi
 !
 ! !PUBLIC TYPES:
   implicit none
@@ -36,10 +35,14 @@ module clmtypeInitMod
   private :: init_energy_balance_type
   private :: init_water_balance_type
   private :: init_pft_ecophys_constants
+#if (defined CNDV)
   private :: init_pft_DGVMecophys_constants
+#endif
   private :: init_pft_pstate_type
   private :: init_pft_epv_type
+#if (defined CNDV)
   private :: init_pft_pdgvstate_type
+#endif
   private :: init_pft_vstate_type
   private :: init_pft_estate_type
   private :: init_pft_wstate_type
@@ -120,208 +123,250 @@ contains
     call get_proc_bounds(begg, endg, begl, endl, begc, endc, begp, endp)
     call get_proc_global(numg, numl, numc, nump)
 
-    call init_pft_type     (begp, endp, pft)
-    call init_column_type  (begc, endc, col)
-    call init_landunit_type(begl, endl, lun)
-    call init_gridcell_type(begg, endg, grc)
+    call init_pft_type     (begp, endp, clm3%g%l%c%p)
+    call init_column_type  (begc, endc, clm3%g%l%c)
+    call init_landunit_type(begl, endl, clm3%g%l)
+    call init_gridcell_type(begg, endg, clm3%g)
 
     ! pft ecophysiological constants
 
     call init_pft_ecophys_constants()
 
+#if (defined CNDV)
     ! pft DGVM-specific ecophysiological constants
 
-    if (use_cndv) then
-       call init_pft_DGVMecophys_constants()
-    end if
+    call init_pft_DGVMecophys_constants()
+#endif
 
     ! energy balance structures (all levels)
 
-    call init_energy_balance_type(begp, endp, pebal)
-    call init_energy_balance_type(begc, endc, cebal)
+    call init_energy_balance_type(begp, endp, clm3%g%l%c%p%pebal)
+    call init_energy_balance_type(begc, endc, clm3%g%l%c%cebal)
+    call init_energy_balance_type(begl, endl, clm3%g%l%lebal)
+    call init_energy_balance_type(begg, endg, clm3%g%gebal)
+    call init_energy_balance_type(1,       1, clm3%mebal)
 
     ! water balance structures (all levels)
 
-    call init_water_balance_type(begp, endp, pwbal)
-    call init_water_balance_type(begc, endc, cwbal)
+    call init_water_balance_type(begp, endp, clm3%g%l%c%p%pwbal)
+    call init_water_balance_type(begc, endc, clm3%g%l%c%cwbal)
+    call init_water_balance_type(begl, endl, clm3%g%l%lwbal)
+    call init_water_balance_type(begg, endg, clm3%g%gwbal)
+    call init_water_balance_type(1,       1, clm3%mwbal)
 
     ! carbon balance structures (pft and column levels)
 
-    call init_carbon_balance_type(begp, endp, pcbal)
-    call init_carbon_balance_type(begc, endc, ccbal)
+    call init_carbon_balance_type(begp, endp, clm3%g%l%c%p%pcbal)
+    call init_carbon_balance_type(begc, endc, clm3%g%l%c%ccbal)
 
     ! nitrogen balance structures (pft and column levels)
 
-    call init_nitrogen_balance_type(begp, endp, pnbal)
-    call init_nitrogen_balance_type(begc, endc, cnbal)
+    call init_nitrogen_balance_type(begp, endp, clm3%g%l%c%p%pnbal)
+    call init_nitrogen_balance_type(begc, endc, clm3%g%l%c%cnbal)
 
     ! pft physical state variables at pft level and averaged to the column
 
-    call init_pft_pstate_type(begp, endp, pps)
-    call init_pft_pstate_type(begc, endc, pps_a)
+    call init_pft_pstate_type(begp, endp, clm3%g%l%c%p%pps)
+    call init_pft_pstate_type(begc, endc, clm3%g%l%c%cps%pps_a)
 
     ! pft ecophysiological variables (only at the pft level for now)
-    call init_pft_epv_type(begp, endp, pepv)
+    call init_pft_epv_type(begp, endp, clm3%g%l%c%p%pepv)
 
-    ! pft DGVM state variables at pft level 
+#if (defined CNDV)
+    ! pft DGVM state variables at pft level and averaged to column
 
-    if (use_cndv) then
-       call init_pft_pdgvstate_type(begp, endp, pdgvs)
-    end if
-    call init_pft_vstate_type(begp, endp, pvs)
+    call init_pft_pdgvstate_type(begp, endp, clm3%g%l%c%p%pdgvs)
+#endif
+#if (defined CNDV)
+    call init_pft_pdgvstate_type(begc, endc, clm3%g%l%c%cdgvs%pdgvs_a)
+#endif
+    call init_pft_vstate_type(begp, endp, clm3%g%l%c%p%pvs)
 
-    ! pft energy state variables at the pft level
+    ! pft energy state variables at the pft level and averaged to the column
 
-    call init_pft_estate_type(begp, endp, pes)
+    call init_pft_estate_type(begp, endp, clm3%g%l%c%p%pes)
+    call init_pft_estate_type(begc, endc, clm3%g%l%c%ces%pes_a)
 
     ! pft water state variables at the pft level and averaged to the column
 
-    call init_pft_wstate_type(begp, endp, pws)
-    call init_pft_wstate_type(begc, endc, pws_a)
+    call init_pft_wstate_type(begp, endp, clm3%g%l%c%p%pws)
+    call init_pft_wstate_type(begc, endc, clm3%g%l%c%cws%pws_a)
 
     ! pft carbon state variables at the pft level and averaged to the column
 
-    call init_pft_cstate_type(begp, endp, pcs)
-    call init_pft_cstate_type(begc, endc, pcs_a)
-    if (use_c13) then
-       ! 4/14/05: PET
-       ! Adding isotope code
-       call init_pft_cstate_type(begp, endp, pc13s)
-       call init_pft_cstate_type(begc, endc, pc13s_a)
-       if (use_crop) then
-          call endrun( trim(subname)//" ERROR:: CROP and C13 can NOT be on at the same time" )
-       end if
-    endif
+    call init_pft_cstate_type(begp, endp, clm3%g%l%c%p%pcs)
+    call init_pft_cstate_type(begc, endc, clm3%g%l%c%ccs%pcs_a)
+#if (defined C13)
+    ! 4/14/05: PET
+    ! Adding isotope code
+    call init_pft_cstate_type(begp, endp, clm3%g%l%c%p%pc13s)
+    call init_pft_cstate_type(begc, endc, clm3%g%l%c%cc13s%pcs_a)
+#ifdef CROP
+    call endrun( trim(subname)//" ERROR:: CROP and C13 can NOT be on at the same time" )
+#endif
+#endif
 
     ! pft nitrogen state variables at the pft level and averaged to the column
 
-    call init_pft_nstate_type(begp, endp, pns)
-    call init_pft_nstate_type(begc, endc, pns_a)
+    call init_pft_nstate_type(begp, endp, clm3%g%l%c%p%pns)
+    call init_pft_nstate_type(begc, endc, clm3%g%l%c%cns%pns_a)
 
-    ! pft energy flux variables at pft level 
+    ! pft energy flux variables at pft level and averaged to column
 
-    call init_pft_eflux_type(begp, endp, pef)
+    call init_pft_eflux_type(begp, endp, clm3%g%l%c%p%pef)
+    call init_pft_eflux_type(begc, endc, clm3%g%l%c%cef%pef_a)
 
-    ! pft momentum flux variables at pft level 
+    ! pft momentum flux variables at pft level and averaged to the column
 
-    call init_pft_mflux_type(begp, endp, pmf)
+    call init_pft_mflux_type(begp, endp, clm3%g%l%c%p%pmf)
+    call init_pft_mflux_type(begc, endc, clm3%g%l%c%cmf%pmf_a)
 
     ! pft water flux variables
 
-    call init_pft_wflux_type(begp, endp, pwf)
-    call init_pft_wflux_type(begc, endc, pwf_a)
+    call init_pft_wflux_type(begp, endp, clm3%g%l%c%p%pwf)
+    call init_pft_wflux_type(begc, endc, clm3%g%l%c%cwf%pwf_a)
 
     ! pft carbon flux variables at pft level and averaged to column
 
-    call init_pft_cflux_type(begp, endp, pcf)
-    call init_pft_cflux_type(begc, endc, pcf_a)
-    if (use_c13) then
-       ! 4/14/05: PET
-       ! Adding isotope code
-       call init_pft_cflux_type(begp, endp, pc13f)
-       call init_pft_cflux_type(begc, endc, pc13f_a)
-    endif
+    call init_pft_cflux_type(begp, endp, clm3%g%l%c%p%pcf)
+    call init_pft_cflux_type(begc, endc, clm3%g%l%c%ccf%pcf_a)
+#if (defined C13)
+    ! 4/14/05: PET
+    ! Adding isotope code
+    call init_pft_cflux_type(begp, endp, clm3%g%l%c%p%pc13f)
+    call init_pft_cflux_type(begc, endc, clm3%g%l%c%cc13f%pcf_a)
+#endif
 
     ! pft nitrogen flux variables at pft level and averaged to column
 
-    call init_pft_nflux_type(begp, endp, pnf)
-    call init_pft_nflux_type(begc, endc, pnf_a)
+    call init_pft_nflux_type(begp, endp, clm3%g%l%c%p%pnf)
+    call init_pft_nflux_type(begc, endc, clm3%g%l%c%cnf%pnf_a)
 
-    ! pft VOC flux variables at pft level
+    ! pft VOC flux variables at pft level and averaged to column
 
-    call init_pft_vflux_type(begp, endp, pvf)
+    call init_pft_vflux_type(begp, endp, clm3%g%l%c%p%pvf)
+    call init_pft_vflux_type(begc, endc, clm3%g%l%c%cvf%pvf_a)
 
     ! gridcell VOC emission factors (heald, 05/06)
 
-    call init_gridcell_efstate_type(begg, endg, gve)
+    call init_gridcell_efstate_type(begg, endg, clm3%g%gve)
 
-    ! pft dust flux variables at pft level 
+    ! pft dust flux variables at pft level and averaged to column
 
-    call init_pft_dflux_type(begp, endp, pdf)
+    call init_pft_dflux_type(begp, endp, clm3%g%l%c%p%pdf)
+    call init_pft_dflux_type(begc, endc, clm3%g%l%c%cdf%pdf_a)
 
-    ! pft dry dep velocity variables at pft level 
+    ! pft dry dep velocity variables at pft level and averaged to column
 
-    call init_pft_depvd_type(begp, endp, pdd)
+    call init_pft_depvd_type(begp, endp, clm3%g%l%c%p%pdd)
 
-    ! column physical state variables at column level 
+    ! column physical state variables at column level and averaged to
+    ! the landunit and gridcell and model
 
-    call init_column_pstate_type(begc, endc, cps)
+    call init_column_pstate_type(begc, endc, clm3%g%l%c%cps)
+    call init_column_pstate_type(begl, endl, clm3%g%l%lps%cps_a)
+    call init_column_pstate_type(begg, endg, clm3%g%gps%cps_a)
+    call init_column_pstate_type(1,       1, clm3%mps%cps_a)
 
-    ! column energy state variables at column level 
+    ! column energy state variables at column level and averaged to
+    ! the landunit and gridcell and model
 
+    call init_column_estate_type(begc, endc, clm3%g%l%c%ces)
+    call init_column_estate_type(begl, endl, clm3%g%l%les%ces_a)
+    call init_column_estate_type(begg, endg, clm3%g%ges%ces_a)
+    call init_column_estate_type(1,       1, clm3%mes%ces_a)
 
-    call init_column_estate_type(begc, endc, ces)
+    ! column water state variables at column level and averaged to
+    ! the landunit and gridcell and model
 
-    ! column water state variables at column level 
+    call init_column_wstate_type(begc, endc, clm3%g%l%c%cws)
+    call init_column_wstate_type(begl, endl, clm3%g%l%lws%cws_a)
+    call init_column_wstate_type(begg, endg, clm3%g%gws%cws_a)
+    call init_column_wstate_type(1,       1, clm3%mws%cws_a)
 
-    call init_column_wstate_type(begc, endc, cws)
+    ! column carbon state variables at column level and averaged to
+    ! the landunit and gridcell and model
 
-    ! column carbon state variables at column level
+    call init_column_cstate_type(begc, endc, clm3%g%l%c%ccs)
+    call init_column_cstate_type(begl, endl, clm3%g%l%lcs%ccs_a)
+    call init_column_cstate_type(begg, endg, clm3%g%gcs%ccs_a)
+    call init_column_cstate_type(1,       1, clm3%mcs%ccs_a)
+#if (defined C13)
+    ! 4/14/05: PET
+    ! Adding isotope code
+    call init_column_cstate_type(begc, endc, clm3%g%l%c%cc13s)
+#endif
 
-    call init_column_cstate_type(begc, endc, ccs)
-    if (use_c13) then
-       ! 4/14/05: PET
-       ! Adding isotope code
-       call init_column_cstate_type(begc, endc, cc13s)
-    endif
+    ! column nitrogen state variables at column level and averaged to
+    ! the landunit and gridcell and model
 
-    ! column nitrogen state variables at column level
+    call init_column_nstate_type(begc, endc, clm3%g%l%c%cns)
+    call init_column_nstate_type(begl, endl, clm3%g%l%lns%cns_a)
+    call init_column_nstate_type(begg, endg, clm3%g%gns%cns_a)
+    call init_column_nstate_type(1,       1, clm3%mns%cns_a)
 
-    call init_column_nstate_type(begc, endc, cns)
+    ! column energy flux variables at column level and averaged to
+    ! the landunit and gridcell and model
 
-    ! column energy flux variables at column level 
+    call init_column_eflux_type(begc, endc, clm3%g%l%c%cef)
+    call init_column_eflux_type(begl, endl, clm3%g%l%lef%cef_a)
+    call init_column_eflux_type(begg, endg, clm3%g%gef%cef_a)
+    call init_column_eflux_type(1,       1, clm3%mef%cef_a)
 
-    call init_column_eflux_type(begc, endc, cef)
+    ! column water flux variables at column level and averaged to
+    ! landunit, gridcell and model level
 
-    ! column water flux variables at column level 
-
-    call init_column_wflux_type(begc, endc, cwf)
+    call init_column_wflux_type(begc, endc, clm3%g%l%c%cwf)
+    call init_column_wflux_type(begl, endl, clm3%g%l%lwf%cwf_a)
+    call init_column_wflux_type(begg, endg, clm3%g%gwf%cwf_a)
+    call init_column_wflux_type(1,       1, clm3%mwf%cwf_a)
 
     ! column carbon flux variables at column level
 
-    call init_column_cflux_type(begc, endc, ccf)
-    if (use_c13) then
-       ! 4/14/05: PET
-       ! Adding isotope code
-       call init_column_cflux_type(begc, endc, cc13f)
-    endif
+    call init_column_cflux_type(begc, endc, clm3%g%l%c%ccf)
+#if (defined C13)
+    ! 4/14/05: PET
+    ! Adding isotope code
+    call init_column_cflux_type(begc, endc, clm3%g%l%c%cc13f)
+#endif
 
     ! column nitrogen flux variables at column level
 
-    call init_column_nflux_type(begc, endc, cnf)
+    call init_column_nflux_type(begc, endc, clm3%g%l%c%cnf)
 
     ! land unit physical state variables
 
-    call init_landunit_pstate_type(begl, endl, lps)
+    call init_landunit_pstate_type(begl, endl, clm3%g%l%lps)
 
     ! land unit energy flux variables 
 
-    call init_landunit_eflux_type(begl, endl, lef)
+    call init_landunit_eflux_type(begl, endl, clm3%g%l%lef)
 
+#if (defined CNDV)
     ! gridcell DGVM variables
 
-    if (use_cndv) then
-       call init_gridcell_dgvstate_type(begg, endg, gdgvs)
-    end if
+    call init_gridcell_dgvstate_type(begg, endg, clm3%g%gdgvs)
+#endif
 
     ! gridcell physical state variables
 
+    call init_gridcell_pstate_type(begg, endg, clm3%g%gps)
 
     ! gridcell: water flux variables
 
-    call init_gridcell_wflux_type(begg, endg, gwf)
+    call init_gridcell_wflux_type(begg, endg, clm3%g%gwf)
 
     ! gridcell: energy flux variables
 
-    call init_gridcell_eflux_type(begg, endg, gef)
+    call init_gridcell_eflux_type(begg, endg, clm3%g%gef)
 
     ! gridcell: water state variables
 
-    call init_gridcell_wstate_type(begg, endg, gws)
+    call init_gridcell_wstate_type(begg, endg, clm3%g%gws)
 
     ! gridcell: energy state variables
 
-    call init_gridcell_estate_type(begg, endg, ges)
+    call init_gridcell_estate_type(begg, endg, clm3%g%ges)
 
   end subroutine initClmtype
 
@@ -347,14 +392,12 @@ contains
 !EOP
 !------------------------------------------------------------------------
 
-    allocate(pft%gridcell(beg:end),&
-             pft%wtgcell(beg:end), &
-             pft%landunit(beg:end),&
-             pft%wtlunit(beg:end), &
-             pft%column(beg:end),  &
-             pft%wtcol(beg:end),   &
-             pft%itype(beg:end),   &
-             pft%mxy(beg:end))
+    allocate(p%gridcell(beg:end),p%wtgcell(beg:end))
+    allocate(p%landunit(beg:end),p%wtlunit(beg:end))
+    allocate(p%column  (beg:end),p%wtcol  (beg:end))
+
+    allocate(p%itype(beg:end))
+    allocate(p%mxy(beg:end))
 
   end subroutine init_pft_type
 
@@ -380,14 +423,12 @@ contains
 !EOP
 !------------------------------------------------------------------------
 
-   allocate(col%gridcell(beg:end),&
-            col%wtgcell(beg:end), &
-            col%landunit(beg:end),&
-            col%wtlunit(beg:end), &
-            col%pfti(beg:end),    &
-            col%pftf(beg:end),    &
-            col%npfts(beg:end),   &
-            col%itype(beg:end))
+   allocate(c%gridcell(beg:end),c%wtgcell(beg:end))
+   allocate(c%landunit(beg:end),c%wtlunit(beg:end))
+
+   allocate(c%pfti(beg:end),c%pftf(beg:end),c%npfts(beg:end))
+
+   allocate(c%itype(beg:end))
 
   end subroutine init_column_type
 
@@ -413,38 +454,35 @@ contains
 !EOP
 !------------------------------------------------------------------------
 
-   allocate(lun%gridcell(beg:end), &
-            lun%wtgcell(beg:end),  &
-            lun%coli(beg:end),     &
-            lun%colf(beg:end),     &
-            lun%ncolumns(beg:end), &
-            lun%pfti(beg:end),     &
-            lun%pftf(beg:end),     &
-            lun%npfts(beg:end),    & 
-            lun%itype(beg:end),    &
-            lun%ifspecial(beg:end),& 
-            lun%lakpoi(beg:end),   &
-            lun%urbpoi(beg:end),   &
-            lun%glcmecpoi(beg:end))
+   allocate(l%gridcell(beg:end),l%wtgcell(beg:end))
 
-   ! These should be moved to landunit physical state
-   allocate(lun%canyon_hwr(beg:end),   &
-            lun%wtroad_perv(beg:end),  &
-            lun%ht_roof(beg:end),      &
-            lun%wtlunit_roof(beg:end), &
-            lun%wind_hgt_canyon(beg:end),&
-            lun%z_0_town(beg:end),     &
-            lun%z_d_town(beg:end))
+   allocate(l%coli(beg:end),l%colf(beg:end),l%ncolumns(beg:end))
+   allocate(l%pfti(beg:end),l%pftf(beg:end),l%npfts   (beg:end))
 
-   lun%canyon_hwr(beg:end)     = nan
-   lun%wtroad_perv(beg:end)    = nan
-   lun%ht_roof(beg:end)        = nan
-   lun%wtlunit_roof(beg:end)   = nan
-   lun%wind_hgt_canyon(beg:end)= nan
-   lun%z_0_town(beg:end)       = nan
-   lun%z_d_town(beg:end)       = nan
+   allocate(l%itype(beg:end))
+   allocate(l%ifspecial(beg:end))
+   allocate(l%lakpoi(beg:end))
+   allocate(l%urbpoi(beg:end))
+   allocate(l%glcmecpoi(beg:end))
 
-   lun%glcmecpoi(beg:end) = .false.
+   ! MV - these should be moved to landunit physical state -MV
+   allocate(l%canyon_hwr(beg:end))
+   allocate(l%wtroad_perv(beg:end))
+   allocate(l%ht_roof(beg:end))
+   allocate(l%wtlunit_roof(beg:end))
+   allocate(l%wind_hgt_canyon(beg:end))
+   allocate(l%z_0_town(beg:end))
+   allocate(l%z_d_town(beg:end))
+
+   l%canyon_hwr(beg:end)  = nan
+   l%wtroad_perv(beg:end) = nan
+   l%ht_roof(beg:end) = nan
+   l%wtlunit_roof(beg:end) = nan
+   l%wind_hgt_canyon(beg:end) = nan
+   l%z_0_town(beg:end) = nan
+   l%z_d_town(beg:end) = nan
+
+   l%glcmecpoi(beg:end) = .false.
 
   end subroutine init_landunit_type
 
@@ -470,30 +508,31 @@ contains
 !EOP
 !------------------------------------------------------------------------
 
-   allocate(grc%luni(beg:end),      &
-            grc%lunf(beg:end),      &
-            grc%nlandunits(beg:end),&
-            grc%coli(beg:end),      &
-            grc%colf(beg:end),      &
-            grc%ncolumns(beg:end),  &
-            grc%pfti(beg:end),      &
-            grc%pftf(beg:end),      &
-            grc%npfts(beg:end),     &
-            grc%gindex(beg:end),    &
-            grc%area(beg:end),      &
-            grc%lat(beg:end),       &
-            grc%lon(beg:end),       &
-            grc%latdeg(beg:end),    &
-            grc%londeg(beg:end),    &
-            grc%gris_mask(beg:end), &
-            grc%gris_area(beg:end), &
-            grc%aais_mask(beg:end), &
-            grc%aais_area(beg:end))
+   allocate(g%luni(beg:end),g%lunf(beg:end),g%nlandunits(beg:end))
+   allocate(g%coli(beg:end),g%colf(beg:end),g%ncolumns  (beg:end))
+   allocate(g%pfti(beg:end),g%pftf(beg:end),g%npfts     (beg:end))
 
-   grc%gris_mask(beg:end) = nan
-   grc%gris_area(beg:end) = nan
-   grc%aais_mask(beg:end) = nan
-   grc%aais_area(beg:end) = nan
+   allocate(g%gindex(beg:end))
+   allocate(g%area(beg:end))
+   allocate(g%lat(beg:end))
+   allocate(g%lon(beg:end))
+   allocate(g%latdeg(beg:end))
+   allocate(g%londeg(beg:end))
+   allocate(g%gindex_a(beg:end))
+   allocate(g%lat_a(beg:end))
+   allocate(g%lon_a(beg:end))
+   allocate(g%latdeg_a(beg:end))
+   allocate(g%londeg_a(beg:end))
+
+   allocate(g%gris_mask(beg:end))
+   allocate(g%gris_area(beg:end))
+   allocate(g%aais_mask(beg:end))
+   allocate(g%aais_area(beg:end))
+
+   g%gris_mask(beg:end) = nan
+   g%gris_area(beg:end) = nan
+   g%aais_mask(beg:end) = nan
+   g%aais_area(beg:end) = nan
 
   end subroutine init_gridcell_type
 
@@ -695,8 +734,8 @@ contains
     allocate(pftcon%resist(0:numpft))
     allocate(pftcon%dwood(0:numpft))
 
-    pftcon%noveg(:) = huge(1)
-    pftcon%tree(:) = huge(1)
+    pftcon%noveg(:) = bigint
+    pftcon%tree(:) = bigint
     pftcon%smpso(:) = nan
     pftcon%smpsc(:) = nan
     pftcon%fnitr(:) = nan
@@ -745,6 +784,7 @@ contains
 
   end subroutine init_pft_ecophys_constants
 
+#if (defined CNDV)
 !------------------------------------------------------------------------
 !BOP
 !
@@ -786,6 +826,7 @@ contains
     dgv_pftcon%allom3(:) = nan
 
   end subroutine init_pft_DGVMecophys_constants
+#endif
 
 !------------------------------------------------------------------------
 !BOP
@@ -801,6 +842,9 @@ contains
 ! !USES:
     use clm_varcon, only : spval
     use surfrdMod , only : crop_prog
+#if (defined CASA)
+    use CASAMod   , only : npools, nresp_pools, nlive, npool_types
+#endif
 ! !ARGUMENTS:
     implicit none
     integer, intent(in) :: beg, end
@@ -899,9 +943,11 @@ contains
     ! Adding isotope code
     allocate(pps%cisun(beg:end))
     allocate(pps%cisha(beg:end))
+#if (defined C13)
     allocate(pps%alphapsnsun(beg:end))
     allocate(pps%alphapsnsha(beg:end))
-
+#endif
+    ! heald: added from CASA definition
     allocate(pps%sandfrac(beg:end))
     allocate(pps%clayfrac(beg:end))
     pps%sandfrac(beg:end) = nan
@@ -912,8 +958,80 @@ contains
     pps%mlaidiff(beg:end) = nan
     pps%rb1(beg:end) = nan
     pps%annlai(:,:) = nan
+
     
-    pps%frac_veg_nosno(beg:end) = huge(1)
+#if (defined CASA)
+    allocate(pps%Closs(beg:end,npools))  ! C lost to atm
+    allocate(pps%Ctrans(beg:end,npool_types))  ! C transfers out of pool types
+    allocate(pps%Resp_C(beg:end,npools))
+    allocate(pps%Tpool_C(beg:end,npools))! Total C pool size
+    allocate(pps%eff(beg:end,nresp_pools))
+    allocate(pps%frac_donor(beg:end,nresp_pools))
+    allocate(pps%livefr(beg:end,nlive))  !live fraction
+    allocate(pps%pet(beg:end))           !potential evaporation (mm h2o/s)
+    allocate(pps%co2flux(beg:end))       ! net CO2 flux (g C/m2/sec) [+= atm]
+    allocate(pps%fnpp(beg:end))          ! NPP  (g C/m2/sec)
+    allocate(pps%soilt(beg:end))         !soil temp for top 30cm
+    allocate(pps%smoist(beg:end))        !soil moisture for top 30cm
+    allocate(pps%sz(beg:end))
+    allocate(pps%watopt(beg:end))
+    allocate(pps%watdry(beg:end))
+    allocate(pps%soiltc(beg:end))         !soil temp for entire column
+    allocate(pps%smoistc(beg:end))        !soil moisture for entire column
+    allocate(pps%szc(beg:end))
+    allocate(pps%watoptc(beg:end))
+    allocate(pps%watdryc(beg:end))
+    allocate(pps%Wlim(beg:end))
+    allocate(pps%litterscalar(beg:end))
+    allocate(pps%rootlitscalar(beg:end))
+    allocate(pps%stressCD(beg:end))
+    allocate(pps%excessC(beg:end))       ! excess Carbon (gC/m2/timestep)
+    allocate(pps%bgtemp(beg:end))
+    allocate(pps%bgmoist(beg:end))
+    allocate(pps%plai(beg:end))          ! prognostic LAI (m2 leaf/m2 ground)
+    allocate(pps%Cflux(beg:end))
+    allocate(pps%XSCpool(beg:end))
+    allocate(pps%tday(beg:end))     ! daily accumulated temperature (deg C)
+    allocate(pps%tdayavg(beg:end))  ! daily averaged temperature (deg C)
+    allocate(pps%tcount(beg:end))   ! counter for daily avg temp
+    allocate(pps%degday(beg:end))   ! accumulated degree days (deg C)
+    allocate(pps%ndegday(beg:end))  ! counter for number of degree days
+    allocate(pps%stressT(beg:end))
+    allocate(pps%stressW(beg:end))  ! water stress function for leaf loss
+    allocate(pps%iseabeg(beg:end))  ! index for start of growing season
+    allocate(pps%nstepbeg(beg:end)) ! nstep at start of growing season
+    allocate(pps%lgrow(beg:end))    ! growing season index (0 or 1) to be
+                                    ! passed daily to CASA to get NPP
+    ! Summary variables added for the C-LAMP Experiments
+    allocate(pps%casa_agnpp(beg:end))
+    allocate(pps%casa_ar(beg:end))
+    allocate(pps%casa_bgnpp(beg:end))
+    allocate(pps%casa_cwdc(beg:end))
+    allocate(pps%casa_cwdc_hr(beg:end))
+    allocate(pps%casa_cwdc_loss(beg:end))
+    allocate(pps%casa_frootc(beg:end))
+    allocate(pps%casa_frootc_alloc(beg:end))
+    allocate(pps%casa_frootc_loss(beg:end))
+    allocate(pps%casa_gpp(beg:end))
+    allocate(pps%casa_hr(beg:end))
+    allocate(pps%casa_leafc(beg:end))
+    allocate(pps%casa_leafc_alloc(beg:end))
+    allocate(pps%casa_leafc_loss(beg:end))
+    allocate(pps%casa_litterc(beg:end))
+    allocate(pps%casa_litterc_hr(beg:end))
+    allocate(pps%casa_litterc_loss(beg:end))
+    allocate(pps%casa_nee(beg:end))
+    allocate(pps%casa_nep(beg:end))
+    allocate(pps%casa_npp(beg:end))
+    allocate(pps%casa_soilc(beg:end))
+    allocate(pps%casa_soilc_hr(beg:end))
+    allocate(pps%casa_soilc_loss(beg:end))
+    allocate(pps%casa_woodc(beg:end))
+    allocate(pps%casa_woodc_alloc(beg:end))
+    allocate(pps%casa_woodc_loss(beg:end))
+#endif
+
+    pps%frac_veg_nosno(beg:end) = bigint
     pps%frac_veg_nosno_alb(beg:end) = 0
     pps%emv(beg:end) = nan
     pps%z0mv(beg:end) = nan
@@ -927,7 +1045,7 @@ contains
     pps%rssha(beg:end) = nan
     pps%laisun(beg:end) = nan
     pps%laisha(beg:end) = nan
-    pps%btran(beg:end) = spval
+    pps%btran(beg:end) = nan
     pps%fsun(beg:end) = spval
     pps%tlai(beg:end) = 0._r8
     pps%tsai(beg:end) = 0._r8
@@ -974,8 +1092,8 @@ contains
        pps%astem(beg:end)       = nan
        pps%croplive(beg:end)    = .false.
        pps%cropplant(beg:end)   = .false.
-       pps%harvdate(beg:end)    = huge(1)
-       pps%idop(beg:end)        = huge(1)
+       pps%harvdate(beg:end)    = bigint
+       pps%idop(beg:end)        = bigint
        pps%peaklai(beg:end)     = 0
     end if
     pps%vds(beg:end) = nan
@@ -1000,10 +1118,78 @@ contains
     ! Adding isotope code
     pps%cisun(beg:end) = nan
     pps%cisha(beg:end) = nan
-    if (use_c13) then
-       pps%alphapsnsun(beg:end) = nan
-       pps%alphapsnsha(beg:end) = nan
-    endif
+#if (defined C13)
+    pps%alphapsnsun(beg:end) = nan
+    pps%alphapsnsha(beg:end) = nan
+#endif
+
+#if (defined CASA)
+    pps%Closs(beg:end,:npools) = spval   !init w/ spval the variables that
+    pps%Ctrans(beg:end,:npool_types) = spval   !init w/ spval the variables that
+    pps%Resp_C(beg:end,:npools) = nan    !go to history, because CASA
+    pps%Tpool_C(beg:end,:npools) = spval !routines do not get called on
+    pps%livefr(beg:end,:nlive) = spval   !first timestep of nsrest=nsrStartup and
+    pps%pet(beg:end) = spval             !history would get nans
+    pps%co2flux(beg:end) = nan           !in the first timestep
+    pps%fnpp(beg:end) = nan
+    pps%excessC(beg:end) = spval
+    pps%bgtemp(beg:end) = spval
+    pps%bgmoist(beg:end) = spval
+    pps%plai(beg:end) = spval
+    pps%Cflux(beg:end) = nan
+    pps%XSCpool(beg:end) = spval
+    pps%tdayavg(beg:end) = spval
+    pps%degday(beg:end) = spval
+    pps%stressT(beg:end) = spval
+    pps%stressW(beg:end) = spval
+    pps%stressCD(beg:end) = spval
+    pps%iseabeg(beg:end) = spval
+    pps%nstepbeg(beg:end) = spval
+    pps%lgrow(beg:end) = spval
+    pps%eff(beg:end,:nresp_pools) = nan
+    pps%frac_donor(beg:end,:nresp_pools) = nan
+    pps%soilt(beg:end) = spval                  ! on history file
+    pps%smoist(beg:end) = spval                 ! on history file
+    pps%sz(beg:end) = nan
+    pps%watopt(beg:end) = nan
+    pps%watdry(beg:end) = nan
+    pps%soiltc(beg:end) = nan
+    pps%smoistc(beg:end) = nan
+    pps%szc(beg:end) = nan
+    pps%watoptc(beg:end) = spval                ! on history file
+    pps%watdryc(beg:end) = spval                ! on history file
+    pps%Wlim(beg:end) = spval                   ! on history file
+    pps%litterscalar(beg:end) = nan
+    pps%rootlitscalar(beg:end) = nan
+    pps%tday(beg:end) = nan
+    pps%tcount(beg:end) = nan
+    pps%ndegday(beg:end) = nan
+    pps%casa_agnpp(beg:end) = nan
+    pps%casa_ar(beg:end) = nan
+    pps%casa_bgnpp(beg:end) = nan
+    pps%casa_cwdc(beg:end) = nan
+    pps%casa_cwdc_hr(beg:end) = nan
+    pps%casa_cwdc_loss(beg:end) = nan
+    pps%casa_frootc(beg:end) = nan
+    pps%casa_frootc_alloc(beg:end) = nan
+    pps%casa_frootc_loss(beg:end) = nan
+    pps%casa_gpp(beg:end) = nan
+    pps%casa_hr(beg:end) = nan
+    pps%casa_leafc(beg:end) = nan
+    pps%casa_leafc_alloc(beg:end) = nan
+    pps%casa_leafc_loss(beg:end) = nan
+    pps%casa_litterc(beg:end) = nan
+    pps%casa_litterc_loss(beg:end) = nan
+    pps%casa_nee(beg:end) = nan
+    pps%casa_nep(beg:end) = nan
+    pps%casa_npp(beg:end) = nan
+    pps%casa_soilc(beg:end) = nan
+    pps%casa_soilc_hr(beg:end) = nan
+    pps%casa_soilc_loss(beg:end) = nan
+    pps%casa_woodc(beg:end) = nan
+    pps%casa_woodc_alloc(beg:end) = nan
+    pps%casa_woodc_loss(beg:end) = nan
+#endif
 
   end subroutine init_pft_pstate_type
 
@@ -1052,7 +1238,9 @@ contains
     allocate(pepv%gpp(beg:end))
     allocate(pepv%availc(beg:end))
     allocate(pepv%xsmrpool_recover(beg:end))
+#if (defined C13)
     allocate(pepv%xsmrpool_c13ratio(beg:end))
+#endif
     allocate(pepv%alloc_pnow(beg:end))
     allocate(pepv%c_allometry(beg:end))
     allocate(pepv%n_allometry(beg:end))
@@ -1070,13 +1258,17 @@ contains
     allocate(pepv%prev_frootc_to_litter(beg:end))
     allocate(pepv%tempsum_npp(beg:end))
     allocate(pepv%annsum_npp(beg:end))
+#if (defined CNDV)
     allocate(pepv%tempsum_litfall(beg:end))
     allocate(pepv%annsum_litfall(beg:end))
+#endif
+#if (defined C13)
     ! 4/21/05, PET
     ! Adding isotope code
     allocate(pepv%rc13_canair(beg:end))
     allocate(pepv%rc13_psnsun(beg:end))
     allocate(pepv%rc13_psnsha(beg:end))
+#endif
 
     pepv%dormant_flag(beg:end) = nan
     pepv%days_active(beg:end) = nan
@@ -1100,9 +1292,9 @@ contains
     pepv%gpp(beg:end) = nan
     pepv%availc(beg:end) = nan
     pepv%xsmrpool_recover(beg:end) = nan
-    if (use_c13) then
-       pepv%xsmrpool_c13ratio(beg:end) = nan
-    endif
+#if (defined C13)
+    pepv%xsmrpool_c13ratio(beg:end) = nan
+#endif
     pepv%alloc_pnow(beg:end) = nan
     pepv%c_allometry(beg:end) = nan
     pepv%n_allometry(beg:end) = nan
@@ -1120,18 +1312,21 @@ contains
     pepv%prev_frootc_to_litter(beg:end) = nan
     pepv%tempsum_npp(beg:end) = nan
     pepv%annsum_npp(beg:end) = nan
+#if (defined CNDV)
     pepv%tempsum_litfall(beg:end) = nan
     pepv%annsum_litfall(beg:end) = nan
-    if (use_c13) then
-       ! 4/21/05, PET
-       ! Adding isotope code
-       pepv%rc13_canair(beg:end) = nan
-       pepv%rc13_psnsun(beg:end) = nan
-       pepv%rc13_psnsha(beg:end) = nan
-    endif
+#endif
+#if (defined C13)
+    ! 4/21/05, PET
+    ! Adding isotope code
+    pepv%rc13_canair(beg:end) = nan
+    pepv%rc13_psnsun(beg:end) = nan
+    pepv%rc13_psnsha(beg:end) = nan
+#endif
     
   end subroutine init_pft_epv_type
 
+#if (defined CNDV)
 !------------------------------------------------------------------------
 !BOP
 !
@@ -1190,6 +1385,7 @@ contains
     pdgvs%heatstress(beg:end)       = nan
 
   end subroutine init_pft_pdgvstate_type
+#endif
 
 !------------------------------------------------------------------------
 !BOP
@@ -1277,7 +1473,9 @@ contains
     allocate(pes%t_ref2m_min_inst_r(beg:end))
     allocate(pes%t_ref2m_max_inst_u(beg:end))
     allocate(pes%t_ref2m_max_inst_r(beg:end))
+#if (defined CNDV) || (defined CROP)
     allocate(pes%t10(beg:end))
+#endif
     if ( crop_prog )then
        allocate(pes%a10tmin(beg:end))
        allocate(pes%a5tmin(beg:end))
@@ -1304,7 +1502,9 @@ contains
     pes%t_ref2m_min_inst_r(beg:end) = nan
     pes%t_ref2m_max_inst_u(beg:end) = nan
     pes%t_ref2m_max_inst_r(beg:end) = nan
+#if (defined CNDV) || (defined CROP)
     pes%t10(beg:end)                = spval
+#endif
     if ( crop_prog )then
        pes%a10tmin(beg:end)     = spval
        pes%a5tmin(beg:end)      = spval
@@ -1401,7 +1601,9 @@ contains
        allocate(pcs%grainc_storage(beg:end))
        allocate(pcs%grainc_xfer(beg:end))
     end if
+#ifdef CN
     allocate(pcs%woodc(beg:end))
+#endif
 
     pcs%leafc(beg:end) = nan
     pcs%leafc_storage(beg:end) = nan
@@ -1436,7 +1638,9 @@ contains
        pcs%grainc_storage(beg:end) = nan
        pcs%grainc_xfer(beg:end)    = nan
     end if
+#ifdef CN
     pcs%woodc(beg:end) = nan
+#endif
 
   end subroutine init_pft_cstate_type
 
@@ -1538,8 +1742,6 @@ contains
 ! !DESCRIPTION:
 ! Initialize pft energy flux variables
 !
-! !USES:
-    use clm_varcon, only : spval
 ! !ARGUMENTS:
     implicit none
     integer, intent(in) :: beg, end
@@ -1655,9 +1857,9 @@ contains
     pef%eflx_sh_veg(beg:end) = nan
     pef%eflx_lh_vege(beg:end) = nan
     pef%eflx_lh_vegt(beg:end) = nan
-    pef%eflx_wasteheat_pft(beg:end) = spval
-    pef%eflx_heat_from_ac_pft(beg:end) = spval
-    pef%eflx_traffic_pft(beg:end) = spval
+    pef%eflx_wasteheat_pft(beg:end) = nan
+    pef%eflx_heat_from_ac_pft(beg:end) = nan
+    pef%eflx_traffic_pft(beg:end) = nan
     pef%eflx_anthro(beg:end) = nan
     pef%cgrnd(beg:end) = nan
     pef%cgrndl(beg:end) = nan
@@ -1810,7 +2012,6 @@ contains
 ! Initialize pft carbon flux variables
 !
 ! !USES:
-    use clm_varcon, only : spval
     use surfrdMod , only : crop_prog
 ! !ARGUMENTS:
     implicit none
@@ -1984,18 +2185,18 @@ contains
        allocate(pcf%transfer_grain_gr(beg:end))
        allocate(pcf%grainc_storage_to_xfer(beg:end))
     end if
-    if (use_cn) then
-       allocate(pcf%frootc_alloc(beg:end))
-       allocate(pcf%frootc_loss(beg:end))
-       allocate(pcf%leafc_alloc(beg:end))
-       allocate(pcf%leafc_loss(beg:end))
-       allocate(pcf%woodc_alloc(beg:end))
-       allocate(pcf%woodc_loss(beg:end))
-    end if
+#ifdef CN
+    allocate(pcf%frootc_alloc(beg:end))
+    allocate(pcf%frootc_loss(beg:end))
+    allocate(pcf%leafc_alloc(beg:end))
+    allocate(pcf%leafc_loss(beg:end))
+    allocate(pcf%woodc_alloc(beg:end))
+    allocate(pcf%woodc_loss(beg:end))
+#endif
 
     pcf%psnsun(beg:end) = nan
     pcf%psnsha(beg:end) = nan
-    pcf%fpsn(beg:end) = spval
+    pcf%fpsn(beg:end) = nan
     pcf%fco2(beg:end) = 0._r8
 
     pcf%m_leafc_to_litter(beg:end) = nan
@@ -2154,14 +2355,14 @@ contains
        pcf%transfer_grain_gr(beg:end)       = nan
        pcf%grainc_storage_to_xfer(beg:end)  = nan
     end if
-    if (use_cn) then
-       pcf%frootc_alloc(beg:end) = nan
-       pcf%frootc_loss(beg:end) = nan
-       pcf%leafc_alloc(beg:end) = nan
-       pcf%leafc_loss(beg:end) = nan
-       pcf%woodc_alloc(beg:end) = nan
-       pcf%woodc_loss(beg:end) = nan
-    end if
+#if (defined CN)
+    pcf%frootc_alloc(beg:end) = nan
+    pcf%frootc_loss(beg:end) = nan
+    pcf%leafc_alloc(beg:end) = nan
+    pcf%leafc_loss(beg:end) = nan
+    pcf%woodc_alloc(beg:end) = nan
+    pcf%woodc_loss(beg:end) = nan
+#endif
 
   end subroutine init_pft_cflux_type
 
@@ -2417,13 +2618,10 @@ contains
 ! Initialize pft VOC flux variables
 !
     use clm_varcon, only : spval
-    use shr_megan_mod, only: shr_megan_megcomps_n, shr_megan_mechcomps_n
 ! !ARGUMENTS:
     implicit none
     integer, intent(in) :: beg, end
     type (pft_vflux_type), intent(inout) :: pvf
-
-    integer :: i
 !
 ! !REVISION HISTORY:
 ! Created by Mariana Vertenstein
@@ -2432,10 +2630,13 @@ contains
 !EOP
 !------------------------------------------------------------------------
 
-    if (shr_megan_mechcomps_n<1) return
-
     allocate(pvf%vocflx_tot(beg:end))
-    allocate(pvf%vocflx(beg:end,1:shr_megan_mechcomps_n))
+    allocate(pvf%vocflx(beg:end,1:nvoc))
+    allocate(pvf%vocflx_1(beg:end))
+    allocate(pvf%vocflx_2(beg:end))
+    allocate(pvf%vocflx_3(beg:end))
+    allocate(pvf%vocflx_4(beg:end))
+    allocate(pvf%vocflx_5(beg:end))
     allocate(pvf%Eopt_out(beg:end))
     allocate(pvf%topt_out(beg:end))
     allocate(pvf%alpha_out(beg:end))
@@ -2452,10 +2653,14 @@ contains
     allocate(pvf%gammaP_out(beg:end))
     allocate(pvf%gammaA_out(beg:end))
     allocate(pvf%gammaS_out(beg:end))
-    allocate(pvf%gammaC_out(beg:end))
 
-    pvf%vocflx_tot(beg:end) = nan
-    pvf%vocflx(beg:end,1:shr_megan_mechcomps_n) = nan
+    pvf%vocflx_tot(beg:end) = spval
+    pvf%vocflx(beg:end,1:nvoc) = spval
+    pvf%vocflx_1(beg:end) = spval
+    pvf%vocflx_2(beg:end) = spval
+    pvf%vocflx_3(beg:end) = spval
+    pvf%vocflx_4(beg:end) = spval
+    pvf%vocflx_5(beg:end) = spval
     pvf%Eopt_out(beg:end) = nan
     pvf%topt_out(beg:end) = nan
     pvf%alpha_out(beg:end) = nan
@@ -2472,14 +2677,6 @@ contains
     pvf%gammaP_out(beg:end) = nan
     pvf%gammaA_out(beg:end) = nan
     pvf%gammaS_out(beg:end) = nan
-    pvf%gammaC_out(beg:end) = nan
-
-    allocate(pvf%meg(shr_megan_megcomps_n))
-
-    do i=1,shr_megan_megcomps_n
-       allocate(pvf%meg(i)%flux_out(beg:end))
-       pvf%meg(i)%flux_out(beg:end) = nan
-    enddo
 
   end subroutine init_pft_vflux_type
 
@@ -2692,7 +2889,11 @@ contains
     allocate(cps%forc_pbot(beg:end))
     allocate(cps%forc_rho(beg:end))
     allocate(cps%glc_topo(beg:end))
-    cps%isoicol(beg:end) = huge(1)
+    allocate(cps%fff(beg:end))
+    allocate(cps%cs(beg:end))
+    allocate(cps%qdm(beg:end))
+    allocate(cps%sy(beg:end))
+    cps%isoicol(beg:end) = bigint
     cps%bsw(beg:end,1:nlevgrnd) = nan
     cps%watsat(beg:end,1:nlevgrnd) = nan
     cps%watfc(beg:end,1:nlevgrnd) = nan
@@ -2718,7 +2919,7 @@ contains
     cps%dz(beg:end,-nlevsno+1:nlevgrnd) = nan
     cps%z (beg:end,-nlevsno+1:nlevgrnd) = nan
     cps%frac_iceold(beg:end,-nlevsno+1:nlevgrnd) = spval
-    cps%imelt(beg:end,-nlevsno+1:nlevgrnd) = huge(1)
+    cps%imelt(beg:end,-nlevsno+1:nlevgrnd) = bigint
     cps%eff_porosity(beg:end,1:nlevgrnd) = spval
     cps%emg(beg:end) = nan
     cps%z0mg(beg:end) = nan
@@ -2803,6 +3004,10 @@ contains
     cps%forc_pbot(beg:end) = nan
     cps%forc_rho(beg:end) = nan
     cps%glc_topo(beg:end) = nan
+    cps%fff(beg:end) = nan
+    cps%cs(beg:end) = nan
+    cps%qdm(beg:end) = nan
+    cps%sy(beg:end) = nan
 
   end subroutine init_column_pstate_type
 
@@ -2884,9 +3089,6 @@ contains
 !------------------------------------------------------------------------
 
     allocate(cws%h2osno(beg:end))
-    allocate(cws%errh2osno(beg:end))
-    allocate(cws%snow_sources(beg:end))
-    allocate(cws%snow_sinks(beg:end))
     allocate(cws%h2osoi_liq(beg:end,-nlevsno+1:nlevgrnd))
     allocate(cws%h2osoi_ice(beg:end,-nlevsno+1:nlevgrnd))
     allocate(cws%h2osoi_liqice_10cm(beg:end))
@@ -2910,9 +3112,6 @@ contains
     allocate(cws%forc_q(beg:end))
 
     cws%h2osno(beg:end) = nan
-    cws%errh2osno(beg:end) = nan
-    cws%snow_sources(beg:end) = nan
-    cws%snow_sinks(beg:end) = nan
     cws%h2osoi_liq(beg:end,-nlevsno+1:nlevgrnd)= spval
     cws%h2osoi_ice(beg:end,-nlevsno+1:nlevgrnd) = spval
     cws%h2osoi_liqice_10cm(beg:end) = spval
@@ -3133,7 +3332,6 @@ contains
     allocate(cwf%qflx_surf(beg:end))
     allocate(cwf%qflx_drain(beg:end))
     allocate(cwf%qflx_top_soil(beg:end))
-    allocate(cwf%qflx_sl_top_soil(beg:end))
     allocate(cwf%qflx_snomelt(beg:end))
     allocate(cwf%qflx_qrgwl(beg:end))
     allocate(cwf%qflx_runoff(beg:end))
@@ -3162,21 +3360,15 @@ contains
     allocate(cwf%flx_dst_dep_wet4(beg:end))
     allocate(cwf%flx_dst_dep(beg:end))
     allocate(cwf%qflx_snofrz_lyr(beg:end,-nlevsno+1:0))
-    allocate(cwf%qflx_snofrz_col(beg:end))
     allocate(cwf%qflx_irrig(beg:end))
     allocate(cwf%qflx_glcice(beg:end))
-    allocate(cwf%qflx_glcice_frz(beg:end))
-    allocate(cwf%qflx_glcice_melt(beg:end))
     allocate(cwf%glc_rofi(beg:end))
     allocate(cwf%glc_rofl(beg:end))
-    allocate(cwf%qflx_floodc(beg:end))
-    allocate(cwf%qflx_snow_melt(beg:end))
 
     cwf%qflx_infl(beg:end) = nan
     cwf%qflx_surf(beg:end) = nan
     cwf%qflx_drain(beg:end) = nan
     cwf%qflx_top_soil(beg:end) = spval
-    cwf%qflx_sl_top_soil(beg:end) = nan
     cwf%qflx_snomelt(beg:end) = nan
     cwf%qflx_qrgwl(beg:end) = nan
     cwf%qflx_runoff(beg:end) = nan
@@ -3205,15 +3397,10 @@ contains
     cwf%flx_dst_dep_wet4(beg:end) = nan
     cwf%flx_dst_dep(beg:end) = nan
     cwf%qflx_snofrz_lyr(beg:end,-nlevsno+1:0) = spval
-    cwf%qflx_snofrz_col(beg:end) = nan
     cwf%qflx_irrig(beg:end)  = nan
-    cwf%qflx_glcice(beg:end) = nan
-    cwf%qflx_glcice_frz(beg:end) = nan
-    cwf%qflx_glcice_melt(beg:end) = nan
+    cwf%qflx_glcice(beg:end) = spval
     cwf%glc_rofi(beg:end)    = nan
     cwf%glc_rofl(beg:end)    = nan
-    cwf%qflx_floodc(beg:end) = spval
-    cwf%qflx_snow_melt(beg:end) = spval
 
   end subroutine init_column_wflux_type
 
@@ -3325,24 +3512,24 @@ contains
     allocate(ccf%soil3_hr(beg:end))
     allocate(ccf%soil3c_to_soil4c(beg:end))
     allocate(ccf%soil4_hr(beg:end))
-    if (use_cn) then
-       allocate(ccf%dwt_seedc_to_leaf(beg:end))
-       allocate(ccf%dwt_seedc_to_deadstem(beg:end))
-       allocate(ccf%dwt_conv_cflux(beg:end))
-       allocate(ccf%dwt_prod10c_gain(beg:end))
-       allocate(ccf%dwt_prod100c_gain(beg:end))
-       allocate(ccf%dwt_frootc_to_litr1c(beg:end))
-       allocate(ccf%dwt_frootc_to_litr2c(beg:end))
-       allocate(ccf%dwt_frootc_to_litr3c(beg:end))
-       allocate(ccf%dwt_livecrootc_to_cwdc(beg:end))
-       allocate(ccf%dwt_deadcrootc_to_cwdc(beg:end))
-       allocate(ccf%dwt_closs(beg:end))
-       allocate(ccf%landuseflux(beg:end))
-       allocate(ccf%landuptake(beg:end))
-       allocate(ccf%prod10c_loss(beg:end))
-       allocate(ccf%prod100c_loss(beg:end))
-       allocate(ccf%product_closs(beg:end))
-    end if
+#ifdef CN
+    allocate(ccf%dwt_seedc_to_leaf(beg:end))
+    allocate(ccf%dwt_seedc_to_deadstem(beg:end))
+    allocate(ccf%dwt_conv_cflux(beg:end))
+    allocate(ccf%dwt_prod10c_gain(beg:end))
+    allocate(ccf%dwt_prod100c_gain(beg:end))
+    allocate(ccf%dwt_frootc_to_litr1c(beg:end))
+    allocate(ccf%dwt_frootc_to_litr2c(beg:end))
+    allocate(ccf%dwt_frootc_to_litr3c(beg:end))
+    allocate(ccf%dwt_livecrootc_to_cwdc(beg:end))
+    allocate(ccf%dwt_deadcrootc_to_cwdc(beg:end))
+    allocate(ccf%dwt_closs(beg:end))
+    allocate(ccf%landuseflux(beg:end))
+    allocate(ccf%landuptake(beg:end))
+    allocate(ccf%prod10c_loss(beg:end))
+    allocate(ccf%prod100c_loss(beg:end))
+    allocate(ccf%product_closs(beg:end))
+#endif
     allocate(ccf%lithr(beg:end))
     allocate(ccf%somhr(beg:end))
     allocate(ccf%hr(beg:end))
@@ -3358,11 +3545,11 @@ contains
     allocate(ccf%col_coutputs(beg:end))
     allocate(ccf%col_fire_closs(beg:end))
 
-    if (use_cn) then
-       allocate(ccf%cwdc_hr(beg:end))
-       allocate(ccf%cwdc_loss(beg:end))
-       allocate(ccf%litterc_loss(beg:end))
-    end if
+#if (defined CN)
+    allocate(ccf%cwdc_hr(beg:end))
+    allocate(ccf%cwdc_loss(beg:end))
+    allocate(ccf%litterc_loss(beg:end))
+#endif
 
     ccf%m_leafc_to_litr1c(beg:end)                = nan
     ccf%m_leafc_to_litr2c(beg:end)                = nan
@@ -3448,24 +3635,24 @@ contains
     ccf%soil3_hr(beg:end)                         = nan
     ccf%soil3c_to_soil4c(beg:end)                 = nan
     ccf%soil4_hr(beg:end)                         = nan
-    if (use_cn) then
-       ccf%dwt_seedc_to_leaf(beg:end)                = nan
-       ccf%dwt_seedc_to_deadstem(beg:end)            = nan
-       ccf%dwt_conv_cflux(beg:end)                   = nan
-       ccf%dwt_prod10c_gain(beg:end)                 = nan
-       ccf%dwt_prod100c_gain(beg:end)                = nan
-       ccf%dwt_frootc_to_litr1c(beg:end)             = nan
-       ccf%dwt_frootc_to_litr2c(beg:end)             = nan
-       ccf%dwt_frootc_to_litr3c(beg:end)             = nan
-       ccf%dwt_livecrootc_to_cwdc(beg:end)           = nan
-       ccf%dwt_deadcrootc_to_cwdc(beg:end)           = nan
-       ccf%dwt_closs(beg:end)                        = nan
-       ccf%landuseflux(beg:end)                      = nan
-       ccf%landuptake(beg:end)                       = nan
-       ccf%prod10c_loss(beg:end)                     = nan
-       ccf%prod100c_loss(beg:end)                    = nan
-       ccf%product_closs(beg:end)                    = nan
-    end if
+#if (defined CN)
+    ccf%dwt_seedc_to_leaf(beg:end)                = nan
+    ccf%dwt_seedc_to_deadstem(beg:end)            = nan
+    ccf%dwt_conv_cflux(beg:end)                   = nan
+    ccf%dwt_prod10c_gain(beg:end)                 = nan
+    ccf%dwt_prod100c_gain(beg:end)                = nan
+    ccf%dwt_frootc_to_litr1c(beg:end)             = nan
+    ccf%dwt_frootc_to_litr2c(beg:end)             = nan
+    ccf%dwt_frootc_to_litr3c(beg:end)             = nan
+    ccf%dwt_livecrootc_to_cwdc(beg:end)           = nan
+    ccf%dwt_deadcrootc_to_cwdc(beg:end)           = nan
+    ccf%dwt_closs(beg:end)                        = nan
+    ccf%landuseflux(beg:end)                      = nan
+    ccf%landuptake(beg:end)                       = nan
+    ccf%prod10c_loss(beg:end)                     = nan
+    ccf%prod100c_loss(beg:end)                    = nan
+    ccf%product_closs(beg:end)                    = nan
+#endif
     ccf%lithr(beg:end)                            = nan
     ccf%somhr(beg:end)                            = nan
     ccf%hr(beg:end)                               = nan
@@ -3481,11 +3668,11 @@ contains
     ccf%col_coutputs(beg:end)                     = nan
     ccf%col_fire_closs(beg:end)                   = nan
 
-    if (use_cn) then
-       ccf%cwdc_hr(beg:end)                          = nan
-       ccf%cwdc_loss(beg:end)                        = nan
-       ccf%litterc_loss(beg:end)                     = nan
-    end if
+#if (defined CN)
+    ccf%cwdc_hr(beg:end)                          = nan
+    ccf%cwdc_loss(beg:end)                        = nan
+    ccf%litterc_loss(beg:end)                     = nan
+#endif
 
   end subroutine init_column_cflux_type
 
@@ -3815,7 +4002,7 @@ contains
     lps%cv_improad(beg:end,1:5) = nan
     lps%thick_wall(beg:end) = nan
     lps%thick_roof(beg:end) = nan
-    lps%nlev_improad(beg:end) = huge(1)
+    lps%nlev_improad(beg:end) = bigint
     lps%vf_sr(beg:end) = nan
     lps%vf_wr(beg:end) = nan
     lps%vf_sw(beg:end) = nan
@@ -3847,8 +4034,6 @@ contains
 ! !DESCRIPTION: 
 ! Initialize landunit energy flux variables
 !
-! !USES:
-    use clm_varcon, only : spval
 ! !ARGUMENTS:
     implicit none
     integer, intent(in) :: beg, end 
@@ -3865,13 +4050,14 @@ contains
     allocate(lef%eflx_wasteheat(beg:end))
     allocate(lef%eflx_heat_from_ac(beg:end))
 
-    lef%eflx_traffic(beg:end) = spval
+    lef%eflx_traffic(beg:end) = nan
     lef%eflx_traffic_factor(beg:end) = nan
-    lef%eflx_wasteheat(beg:end) = spval
-    lef%eflx_heat_from_ac(beg:end) = spval
+    lef%eflx_wasteheat(beg:end) = nan
+    lef%eflx_heat_from_ac(beg:end) = nan
 
   end subroutine init_landunit_eflux_type
 
+#if (defined CNDV)
 !------------------------------------------------------------------------
 !BOP
 !
@@ -3897,12 +4083,12 @@ contains
     allocate(gps%agdd20(beg:end))
     allocate(gps%tmomin20(beg:end))
     allocate(gps%t10min(beg:end))
-
     gps%agdd20(beg:end) = nan
     gps%tmomin20(beg:end) = nan
     gps%t10min(beg:end) = nan
 
   end subroutine init_gridcell_dgvstate_type
+#endif
 
 !------------------------------------------------------------------------
 !BOP
@@ -4012,13 +4198,11 @@ contains
     allocate(gwf%qflx_snwcp_iceg(beg:end))
     allocate(gwf%qflx_liq_dynbal(beg:end))
     allocate(gwf%qflx_ice_dynbal(beg:end))
-    allocate(gwf%qflx_floodg(beg:end))
 
-    gwf%qflx_runoffg(beg:end) = 0._r8
-    gwf%qflx_snwcp_iceg(beg:end) = 0._r8
+    gwf%qflx_runoffg(beg:end) = nan
+    gwf%qflx_snwcp_iceg(beg:end) = nan
     gwf%qflx_liq_dynbal(beg:end) = nan
     gwf%qflx_ice_dynbal(beg:end) = nan
-    gwf%qflx_floodg(beg:end) = 0._r8 !rtm_flood: initialize to zero for 1st time step instead of nan
 
   end subroutine init_gridcell_wflux_type
 

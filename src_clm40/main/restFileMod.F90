@@ -12,10 +12,9 @@ module restFileMod
   use shr_kind_mod, only : r8 => shr_kind_r8
   use spmdMod     , only : masterproc
   use abortutils  , only : endrun
-  use clm_varctl  , only : iulog, use_cn
+  use clm_varctl  , only : iulog
   use surfrdMod   , only : crop_prog
-  use ncdio_pio   , only : file_desc_t, ncd_pio_createfile, ncd_pio_openfile, ncd_global, &
-                           ncd_pio_closefile, ncd_defdim, ncd_putatt, ncd_enddef, check_dim
+  use ncdio_pio       
 !
 ! !PUBLIC TYPES:
   implicit none
@@ -63,8 +62,16 @@ contains
     use clm_time_manager , only : timemgr_restart_io, get_nstep
     use subgridRestMod   , only : SubgridRest
     use BiogeophysRestMod, only : BiogeophysRest
+#if (defined CN)
     use CNRestMod        , only : CNRest
     use CropRestMod      , only : CropRest
+#endif
+#if (defined RTM)
+    use RtmMod           , only : RTMRest
+#endif
+#if (defined CASA)
+    use CASAMod          , only : CASARest
+#endif
     use accumulMod       , only : accumulRest
     use histFileMod      , only : hist_restart_ncd
 !
@@ -114,12 +121,17 @@ contains
     call SubgridRest( ncid, flag='define' )
 
     call BiogeophysRest( ncid, flag='define' )
+#if (defined CN)
+    call CNRest( ncid, flag='define' )
+    if ( crop_prog ) call CropRest( ncid, flag='define' )
+#endif
 
-    if (use_cn) then
-       call CNRest( ncid, flag='define' )
-       if ( crop_prog ) call CropRest( ncid, flag='define' )
-    end if
-
+#if (defined CASA)
+    call CASARest( ncid, flag='define' )
+#endif
+#if (defined RTM)
+    call RtmRest( ncid, flag='define' )
+#endif
     call accumulRest( ncid, flag='define' )
 
     call hist_restart_ncd ( ncid, flag='define', rdate=rdate )
@@ -136,10 +148,18 @@ contains
 
     call BiogeophysRest( ncid, flag='write' )
 
-    if (use_cn) then
-       call CNRest( ncid, flag='write' )
-       if ( crop_prog ) call CropRest( ncid, flag='write' )
-    end if
+#if (defined CN)
+    call CNRest( ncid, flag='write' )
+    if ( crop_prog ) call CropRest( ncid, flag='write' )
+#endif
+
+#if (defined CASA)
+    call CASARest( ncid, flag='write' )
+#endif
+
+#if (defined RTM)
+    call RtmRest( ncid, flag='write' )
+#endif
 
     call accumulRest( ncid, flag='write' )
     
@@ -178,8 +198,16 @@ contains
 !
 ! !USES:
     use BiogeophysRestMod, only : BiogeophysRest
+#if (defined CN)
     use CNRestMod        , only : CNRest
     use CropRestMod      , only : CropRest
+#endif
+#if (defined RTM)
+    use RtmMod           , only : RTMRest
+#endif
+#if (defined CASA)
+    use CASAMod          , only : CASARest
+#endif
     use accumulMod       , only : accumulRest
     use histFileMod      , only : hist_restart_ncd
 !
@@ -210,10 +238,18 @@ contains
 
     call BiogeophysRest( ncid, flag='read' )
 
-    if (use_cn) then
-       call CNRest( ncid, flag='read' )
-       if ( crop_prog ) call CropRest( ncid, flag='read' )
-    end if
+#if (defined CN)
+    call CNRest( ncid, flag='read' )
+    if ( crop_prog ) call CropRest( ncid, flag='read' )
+#endif
+
+#if (defined CASA)
+    call CASARest( ncid, flag='read' )
+#endif
+
+#if (defined RTM)
+    call RtmRest( ncid, flag='read' )
+#endif
 
     call accumulRest( ncid, flag='read' )
     
@@ -326,7 +362,7 @@ contains
 !
 ! !USES:
     use fileutils , only : opnfil, getavu, relavu
-    use clm_varctl, only : rpntfil, rpntdir, inst_suffix
+    use clm_varctl, only : rpntfil, rpntdir
 !
 ! !ARGUMENTS:
     implicit none
@@ -358,7 +394,7 @@ contains
     endif
 
     nio = getavu()
-    locfn = trim(rpntdir) //'/'// trim(rpntfil)//trim(inst_suffix)
+    locfn = trim(rpntdir) //'/'// trim(rpntfil)
     call opnfil (locfn, nio, 'f')
     read (nio,'(a256)') pnamer
     call relavu (nio)
@@ -384,6 +420,7 @@ contains
 !
 ! !USES:
     use clm_time_manager, only : is_last_step
+    use fileutils   , only : putfil, set_filename
 !
 ! !ARGUMENTS:
     implicit none
@@ -422,8 +459,8 @@ contains
 ! Open restart pointer file. Write names of current netcdf restart file.
 !
 ! !USES:
-    use clm_varctl, only : rpntdir, rpntfil, inst_suffix
-    use fileutils , only : relavu
+    use clm_varctl, only : rpntdir, rpntfil
+    use fileutils , only : set_filename, relavu
     use fileutils , only : getavu, opnfil
 !
 ! !ARGUMENTS:
@@ -446,7 +483,7 @@ contains
 
     if (masterproc) then
        nio = getavu()
-       filename= trim(rpntdir) //'/'// trim(rpntfil)//trim(inst_suffix)
+       filename= trim(rpntdir) //'/'// trim(rpntfil)
        call opnfil( filename, nio, 'f' )
        
        write(nio,'(a)') fnamer
@@ -506,7 +543,7 @@ contains
 ! !DESCRIPTION:
 !
 ! !USES:
-    use clm_varctl, only : caseid, inst_suffix
+    use clm_varctl, only : caseid
 !
 ! !ARGUMENTS:
     implicit none
@@ -523,8 +560,7 @@ contains
 !EOP
 !-----------------------------------------------------------------------
 
-    restFile_filename = "./"//trim(caseid)//".clm2"//trim(inst_suffix)//&
-                        ".r."//trim(rdate)//".nc"
+    restFile_filename = "./"//trim(caseid)//".clm2.r."//trim(rdate)//".nc"
     if (masterproc) then
        write(iulog,*)'writing restart file ',trim(restFile_filename),' for model date = ',rdate
     end if
@@ -548,8 +584,14 @@ contains
     use spmdMod     , only : mpicom, MPI_LOGICAL
     use clm_varctl  , only : caseid, ctitle, version, username, hostname, fsurdat, &
                              conventions, source
-    use clm_varpar  , only : numrad, nlevlak, nlevsno, nlevgrnd
+    use clm_varpar  , only : numrad, rtmlon, rtmlat, nlevlak, nlevsno, nlevgrnd
     use decompMod   , only : get_proc_bounds, get_proc_global
+#ifdef RTM
+!    use RunoffMod   , only : get_proc_rof_global
+#endif
+#if (defined CASA)
+  use CASAMod       , only : nlive, npools, npool_types
+#endif
 !
 ! !ARGUMENTS:
     implicit none
@@ -593,6 +635,15 @@ contains
     call ncd_defdim(ncid, 'levsno1'  , nlevsno+1     , dimid)
     call ncd_defdim(ncid, 'levtot'  , nlevsno+nlevgrnd, dimid)
     call ncd_defdim(ncid, 'numrad'  , numrad         , dimid)
+#if (defined CASA)
+    call ncd_defdim (ncid, 'nlive'   , nlive          , dimid)
+    call ncd_defdim (ncid, 'npools'  , npools         , dimid)
+    call ncd_defdim (ncid, 'npool_types', npool_types , dimid)
+#endif
+#if (defined RTM)
+    call ncd_defdim(ncid, 'rtmlon'  , rtmlon         , dimid)
+    call ncd_defdim(ncid, 'rtmlat'  , rtmlat         , dimid)
+#endif
     call ncd_defdim(ncid, 'string_length', 64        , dimid)
        
     ! Define global attributes
@@ -605,14 +656,11 @@ contains
     call ncd_putatt(ncid, NCD_GLOBAL, 'host'    , trim(hostname))
     call ncd_putatt(ncid, NCD_GLOBAL, 'version' , trim(version))
     call ncd_putatt(ncid, NCD_GLOBAL, 'source'  , trim(source))
-    str = '$Id$'
+    str = '$Id: restFileMod.F90 28213 2011-05-02 04:49:16Z erik $'
     call ncd_putatt(ncid, NCD_GLOBAL, 'revision_id'    , trim(str))
     call ncd_putatt(ncid, NCD_GLOBAL, 'case_title'     , trim(ctitle))
     call ncd_putatt(ncid, NCD_GLOBAL, 'case_id'        , trim(caseid))
     call ncd_putatt(ncid, NCD_GLOBAL, 'surface_dataset', trim(fsurdat))
-    call ncd_putatt(ncid, NCD_GLOBAL, 'title', &
-          'CLM Restart information, required to continue a simulation' )
-
     
   end subroutine restFile_dimset
   
@@ -661,6 +709,13 @@ contains
     call check_dim(ncid, 'levsno'  , nlevsno)
     call check_dim(ncid, 'levgrnd' , nlevgrnd)
     call check_dim(ncid, 'levlak'  , nlevlak) 
+#if (defined CASA)
+    ! Dimensions should be checked, but this will only work for initial
+    ! datasets created with CASA enabled so do not normally do this.
+    ! call check_dim(ncid, 'nlive'   , nlive)
+    ! call check_dim(ncid, 'npools'  , npools)
+    ! call check_dim(ncid, 'npool_types'  , npool_types)
+#endif
 
   end subroutine restFile_dimcheck
 

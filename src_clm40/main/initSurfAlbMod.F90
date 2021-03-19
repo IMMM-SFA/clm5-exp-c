@@ -12,7 +12,7 @@ module initSurfalbMod
 ! !USES:
   use shr_kind_mod, only : r8 => shr_kind_r8
   use abortutils,   only : endrun
-  use clm_varctl,   only : iulog, use_cn, use_cndv
+  use clm_varctl,   only : iulog
 !
 ! !PUBLIC TYPES:
   implicit none
@@ -61,9 +61,16 @@ contains
     use clm_time_manager        , only : get_step_size
     use FracWetMod          , only : FracWet
     use SurfaceAlbedoMod    , only : SurfaceAlbedo
+#if (defined CASA)
+  use CASAMod             , only : CASA_ecosystemDyn
+#endif
+#if (defined CN)
     use CNEcosystemDynMod   , only : CNEcosystemDyn
     use CNVegStructUpdateMod, only : CNVegStructUpdate
+    use CNSetValueMod       , only : CNZeroFluxes
+#else
     use STATICEcosysDynMod  , only : EcosystemDyn, interpMonthlyVeg
+#endif
     use UrbanMod            , only : UrbanAlbedo
     use abortutils          , only : endrun
 !
@@ -136,45 +143,45 @@ contains
 
     ! Assign local pointers to derived subtypes components (landunit-level)
     
-    lakpoi              => lun%lakpoi
-    itypelun            => lun%itype
+    lakpoi              => clm3%g%l%lakpoi
+    itypelun            => clm3%g%l%itype
 
     ! Assign local pointers to derived subtypes components (column-level)
 
-    dz                  => cps%dz
-    h2osoi_ice          => cws%h2osoi_ice
-    h2osoi_liq          => cws%h2osoi_liq
-    h2osoi_vol          => cws%h2osoi_vol
-    snowdp              => cps%snowdp
-    h2osno              => cws%h2osno
-    frac_sno            => cps%frac_sno 
-    ctype               => col%itype
-    clandunit           => col%landunit
-    soilpsi             => cps%soilpsi
+    dz                  => clm3%g%l%c%cps%dz
+    h2osoi_ice          => clm3%g%l%c%cws%h2osoi_ice
+    h2osoi_liq          => clm3%g%l%c%cws%h2osoi_liq
+    h2osoi_vol          => clm3%g%l%c%cws%h2osoi_vol
+    snowdp              => clm3%g%l%c%cps%snowdp
+    h2osno              => clm3%g%l%c%cws%h2osno
+    frac_sno            => clm3%g%l%c%cps%frac_sno 
+    ctype               => clm3%g%l%c%itype
+    clandunit           => clm3%g%l%c%landunit
+    soilpsi             => clm3%g%l%c%cps%soilpsi
 
     ! Assign local pointers to derived subtypes components (pft-level)
 
-    plandunit          => pft%landunit
-    frac_veg_nosno_alb => pps%frac_veg_nosno_alb
-    frac_veg_nosno     => pps%frac_veg_nosno
-    fwet               => pps%fwet
+    plandunit          => clm3%g%l%c%p%landunit
+    frac_veg_nosno_alb => clm3%g%l%c%p%pps%frac_veg_nosno_alb
+    frac_veg_nosno     => clm3%g%l%c%p%pps%frac_veg_nosno
+    fwet               => clm3%g%l%c%p%pps%fwet
 
     ! Assign local pointers to derived subtypes components (pft-level)
     ! The folowing pointers will only be used for lake points in this routine
 
-    htop               => pps%htop
-    hbot               => pps%hbot
-    tlai               => pps%tlai
-    tsai               => pps%tsai
-    elai               => pps%elai
-    esai               => pps%esai
-    fdry               => pps%fdry
+    htop               => clm3%g%l%c%p%pps%htop
+    hbot               => clm3%g%l%c%p%pps%hbot
+    tlai               => clm3%g%l%c%p%pps%tlai
+    tsai               => clm3%g%l%c%p%pps%tsai
+    elai               => clm3%g%l%c%p%pps%elai
+    esai               => clm3%g%l%c%p%pps%esai
+    fdry               => clm3%g%l%c%p%pps%fdry
 
-    decl      => cps%decl
-    dayl      => pepv%dayl
-    pcolumn   => pft%column
-    pgridcell => pft%gridcell
-    latdeg    => grc%latdeg 
+    decl      => clm3%g%l%c%cps%decl
+    dayl      => clm3%g%l%c%p%pepv%dayl
+    pcolumn   => clm3%g%l%c%p%column
+    pgridcell => clm3%g%l%c%p%gridcell
+    latdeg    => clm3%g%latdeg 
 
     ! ========================================================================
     ! Determine surface albedo - initialized by calls to ecosystem dynamics and
@@ -185,12 +192,12 @@ contains
     ! frac_sno is needed by SoilAlbedo (called by SurfaceAlbedo)
     ! ========================================================================
 
-    if (.not. use_cn) then
-       ! the default mode uses prescribed vegetation structure
-       ! Read monthly vegetation data for interpolation to daily values
-       
-       call interpMonthlyVeg()
-    end if
+#if (!defined CN)
+    ! the default mode uses prescribed vegetation structure
+    ! Read monthly vegetation data for interpolation to daily values
+
+    call interpMonthlyVeg()
+#endif
 
     ! Determine clump bounds for this processor
 
@@ -223,72 +230,77 @@ contains
        end do
 
        ! ============================================================================
-       ! Ecosystem dynamics: Uses CN, or static parameterizations
+       ! Ecosystem dynamics: Uses CASA, CN, or static parameterizations
        ! ============================================================================
 
-       if (use_cn) then
-          do j = 1, nlevgrnd
-             do fc = 1, filter(nc)%num_soilc
-                c = filter(nc)%soilc(fc)
-                soilpsi(c,j) = -15.0_r8
-             end do
+#if (defined CASA)
+     call casa_ecosystemDyn(begc, endc, begp, endp,    &
+               filter(nc)%num_soilc, filter(nc)%soilc, &
+               filter(nc)%num_soilp, filter(nc)%soilp, init=.true.)
+#endif
+
+#if (defined CASA) || (defined CN)
+       do j = 1, nlevgrnd
+          do fc = 1, filter(nc)%num_soilc
+             c = filter(nc)%soilc(fc)
+
+             soilpsi(c,j) = -15.0_r8
           end do
-       end if
+       end do
+#endif
 
        ! Determine variables needed for SurfaceAlbedo for non-lake points
 
-       if (use_cn) then
-          ! CN initialization is done only on the soil landunits.
+#if defined (CN)
+       ! CN initialization is done only on the soil landunits.
 
-          if (.not. present(declinm1)) then
-             write(iulog,*)'declination for the previous timestep (declinm1) must be ',&
-                  ' present as argument in CN mode'
-             call endrun()
-          end if
-          
-          ! it is necessary to initialize the solar declination for the previous
-          ! timestep (caldaym1) so that the CNphenology routines know if this is 
-          ! before or after the summer solstice.
-          
-          ! declination for previous timestep
-          do c = begc, endc
-             l = clandunit(c)
-             if (itypelun(l) == istsoil .or. itypelun(l) == istcrop) then
-                decl(c) = declinm1
-             end if
-          end do
-          
-          ! daylength for previous timestep
-          do p = begp, endp
-             c = pcolumn(p)
-             l = plandunit(p)
-             if (itypelun(l) == istsoil .or. itypelun(l) == istcrop) then
-                lat = latdeg(pgridcell(p)) * SHR_CONST_PI / 180._r8
-                temp = -(sin(lat)*sin(decl(c)))/(cos(lat) * cos(decl(c)))
-                temp = min(1._r8,max(-1._r8,temp))
-                dayl(p) = 2.0_r8 * 13750.9871_r8 * acos(temp) 
-             end if
-          end do
-          
-          ! declination for current timestep
-          do c = begc, endc
-             l = clandunit(c)
-             if (itypelun(l) == istsoil .or. itypelun(l) == istcrop) then
-                decl(c) = declin
-             end if
-          end do
-          
-          call CNEcosystemDyn(begc, endc, begp, endp, filter(nc)%num_soilc, filter(nc)%soilc, &
-               filter(nc)%num_soilp, filter(nc)%soilp, &
-               filter(nc)%num_pcropp, filter(nc)%pcropp, doalb=.true.)
-
-       else
-
-          ! this is the default call if CN not set
-
-          call EcosystemDyn(begp, endp, filter(nc)%num_nolakep, filter(nc)%nolakep, &
-               doalb=.true.)
+       if (.not. present(declinm1)) then
+          write(iulog,*)'declination for the previous timestep (declinm1) must be ',&
+               ' present as argument in CN mode'
+          call endrun()
        end if
+
+       ! it is necessary to initialize the solar declination for the previous
+       ! timestep (caldaym1) so that the CNphenology routines know if this is 
+       ! before or after the summer solstice.
+
+       ! declination for previous timestep
+       do c = begc, endc
+          l = clandunit(c)
+          if (itypelun(l) == istsoil .or. itypelun(l) == istcrop) then
+             decl(c) = declinm1
+          end if
+       end do
+
+       ! daylength for previous timestep
+       do p = begp, endp
+          c = pcolumn(p)
+          l = plandunit(p)
+          if (itypelun(l) == istsoil .or. itypelun(l) == istcrop) then
+             lat = latdeg(pgridcell(p)) * SHR_CONST_PI / 180._r8
+             temp = -(sin(lat)*sin(decl(c)))/(cos(lat) * cos(decl(c)))
+             temp = min(1._r8,max(-1._r8,temp))
+             dayl(p) = 2.0_r8 * 13750.9871_r8 * acos(temp) 
+          end if
+       end do
+
+       ! declination for current timestep
+       do c = begc, endc
+          l = clandunit(c)
+          if (itypelun(l) == istsoil .or. itypelun(l) == istcrop) then
+             decl(c) = declin
+          end if
+       end do
+
+       call CNEcosystemDyn(begc, endc, begp, endp, filter(nc)%num_soilc, filter(nc)%soilc, &
+            filter(nc)%num_soilp, filter(nc)%soilp, &
+            filter(nc)%num_pcropp, filter(nc)%pcropp, doalb=.true.)
+#else
+       ! this is the default call if CN not set
+
+       call EcosystemDyn(begp, endp, filter(nc)%num_nolakep, filter(nc)%nolakep, &
+            doalb=.true.)
+#endif        
 
        do p = begp, endp
           l = plandunit(p)

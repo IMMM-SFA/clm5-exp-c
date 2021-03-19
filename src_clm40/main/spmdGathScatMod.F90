@@ -13,14 +13,13 @@ module spmdGathScatMod
   use decompMod, only : get_clmlevel_gsmap
   use shr_kind_mod, only: r8 => shr_kind_r8
   use spmdMod
-  use mct_mod
+  use clm_mct_mod
   use abortutils, only : endrun
   use clm_varctl, only : iulog
   use perf_mod
 !
 ! !PUBLIC TYPES:
   implicit none
-  private
 !
 ! !PUBLIC MEMBER FUNCTIONS:
   public  scatter_data_from_master, gather_data_to_master

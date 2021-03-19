@@ -10,10 +10,12 @@ module clm_varctl
 !
 ! !USES:
   use shr_kind_mod, only: r8 => shr_kind_r8
+  use clm_varpar, only: maxpatch_glcmec
+!
 !
 ! !PUBLIC MEMBER FUNCTIONS:
   implicit none
-  public :: clm_varctl_set     ! Set variables
+  public :: set_clmvarctl     ! Set variables
   public :: clmvarctl_init    ! Initialize and check values after namelist input
 
   private
@@ -57,12 +59,15 @@ module clm_varctl
   character(len=256), public :: fatmlndfrc = ' '        ! lnd frac file on atm grid
   character(len=256), public :: fatmtopo   = ' '        ! topography on atm grid
   character(len=256), public :: flndtopo   = ' '        ! topography on lnd grid
-  character(len=256), public :: flanduse_timeseries    = ' '        ! dynamic landuse dataset
+  character(len=256), public :: fpftdyn    = ' '        ! dynamic landuse dataset
   character(len=256), public :: fpftcon    = ' '        ! ASCII data file with PFT physiological constants
   character(len=256), public :: nrevsn     = ' '        ! restart data file name for branch run
   character(len=256), public :: fsnowoptics  = ' '      ! snow optical properties file name
   character(len=256), public :: fsnowaging   = ' '      ! snow aging parameters file name
-
+  character(len=256), public :: fglcmask     = ' '      ! glacier mask file name
+  character(len=8),   public :: fget_archdev = 'null:'  ! archive device to read input files from if not on local disk
+  logical         ,   public :: downscale               ! true => do downscaling with fine mesh
+                                                        ! ASSUMES that all grids are lat/lon
 !
 ! Landunit logic
 !
@@ -79,28 +84,29 @@ module clm_varctl
   logical,  public :: wrtdia       = .false.            ! true => write global average diagnostics to std out
   real(r8), public :: co2_ppmv     = 355._r8            ! atmospheric CO2 molar ratio (by volume) (umol/mol)
 
- ! C isotopes
-  logical, public :: use_c13 = .false.                  ! true => use C-13 model
-  logical, public :: use_c14 = .false.                  ! true => use C-14 model
-
 ! glacier_mec control variables: default values (may be overwritten by namelist)
+! NOTE: glc_nec and glc_smb must have the same values for CLM and GLC
 
-  logical , public :: create_glacier_mec_landunit = .false. ! glacier_mec landunit is not created (set in controlMod)
-  logical , public :: glc_dyntopo = .false.                 ! true => CLM glacier topography changes dynamically
-  real(r8), public, allocatable :: glc_topomax(:)           ! upper limit of each class (m)  (set in surfrd)
-  character(len=256), public :: fglcmask = ' '              ! glacier mask file name
+  logical, public :: create_glacier_mec_landunit = .false.  ! glacier_mec landunit is not created
+  logical, public :: glc_dyntopo = .false.                  ! true => CLM glacier topography changes dynamically
+  logical, public :: glc_smb = .false.                      ! if true, pass surface mass balance info to GLC
+                                                            ! if false, pass positive-degree-day info to GLC
+  integer , public :: glc_nec = 0                           ! number of elevation classes for glacier_mec landunits
+  real(r8), public :: glc_topomax(0:maxpatch_glcmec)        ! upper limit of each class (m)
 !
 ! single column control variables
 !
   logical,  public :: single_column = .false.           ! true => single column mode
-  real(r8), public :: scmlat        = rundef            ! single column lat
-  real(r8), public :: scmlon        = rundef            ! single column lon
+  real(r8), public:: scmlat         = rundef            ! single column lat
+  real(r8), public:: scmlon         = rundef            ! single column lon
+#ifdef RTM
 !
-! instance control
+! Rtm control variables
 !
-  integer, public :: inst_index
-  character(len=16), public :: inst_name
-  character(len=16), public :: inst_suffix
+  character(len=256), public :: frivinp_rtm  = ' '      ! RTM input data file name
+  integer,            public :: rtm_nsteps = iundef     ! if > 1, average rtm over rtm_nsteps time steps
+  logical,            public :: ice_runoff = .true.     ! true => runoff should be split into liquid and ice otherwise just liquid
+#endif
 !
 ! Decomp control variables
 !
@@ -111,58 +117,9 @@ module clm_varctl
   character(len=256), public :: rpntdir = '.'            ! directory name for local restart pointer file
   character(len=256), public :: rpntfil = 'rpointer.lnd' ! file name for local restart pointer file
 !
-! Migration of CPP variables
-! 
-#if (defined CN)
-  logical, public :: use_cn = .true.
-#else
-  logical, public :: use_cn = .false.
-#endif
-#if (defined CNDV)
-  logical, public :: use_cndv = .true.
-#else
-  logical, public :: use_cndv = .false.
-#endif
-#if (defined CROP)
-  logical, public :: use_crop = .true.
-#else
-  logical, public :: use_crop = .false.
-#endif
-#if (defined SNICAR_FRC)
-  logical, public :: use_snicar_frc = .true.
-#else
-  logical, public :: use_snicar_frc = .false.
-#endif
-#if (defined NOFIRE)
-  logical, public :: use_nofire = .true.
-#else
-  logical, public :: use_nofire = .false.
-#endif
-#if (defined VANCOUVER)
-  logical, public :: use_vancouver = .true.
-#else
-  logical, public :: use_vancouver = .false.
-#endif
-#if (defined MEXICOCITY)
-  logical, public :: use_mexicocity = .true.
-#else
-  logical, public :: use_mexicocity = .false.
-#endif
-#if (defined AD_SPINUP) 
-  logical, public :: use_ad_spinup = .true.
-#else
-  logical, public :: use_ad_spinup = .false.
-#endif
-#if (defined EXIT_SPINUP) 
-  logical, public :: use_exit_spinup = .true.
-#else
-  logical, public :: use_exit_spinup = .false.
-#endif
-  !needed for compatibility with changes in clm4_5 and reference dy lnd_comp_mct
-  !however use_voc is not used anywhere inside the clm4_0 code
-  logical, public :: use_voc = .true. 
+! Error growth perturbation limit
 !
-! !PRIVATE DATA MEMBERS:
+  real(r8), public :: pertlim = 0.0_r8                  ! perturbation limit when doing error growth test
 !
 ! !REVISION HISTORY:
 ! Created by Mariana Vertenstein and Gordon Bonan
@@ -179,12 +136,12 @@ contains
 !---------------------------------------------------------------------------
 !BOP
 !
-! !IROUTINE: clm_varctl_set
+! !IROUTINE: set_clmvarctl
 !
 ! !INTERFACE:
-  subroutine clm_varctl_set( caseid_in, ctitle_in, brnch_retain_casename_in,    &
+  subroutine set_clmvarctl( caseid_in, ctitle_in, brnch_retain_casename_in,    &
                             single_column_in, scmlat_in, scmlon_in, nsrest_in, &
-                            version_in, hostname_in, username_in)
+                            version_in, hostname_in, username_in )
 !
 ! !DESCRIPTION:
 !      Set input control variables.
@@ -203,10 +160,9 @@ contains
   character(len=256), optional, intent(IN) :: version_in               ! model version
   character(len=256), optional, intent(IN) :: hostname_in              ! hostname running on
   character(len=256), optional, intent(IN) :: username_in              ! username running job
-
 !
 ! !LOCAL VARIABLES:
-   character(len=32) :: subname = 'clm_varctl_set'  ! subroutine name
+   character(len=32) :: subname = 'set_clmvarctl'  ! subroutine name
 !
 ! !REVISION HISTORY:
 ! Author: Erik Kluzek
@@ -227,7 +183,7 @@ contains
     if ( present(username_in     ) ) username      = username_in
     if ( present(hostname_in     ) ) hostname      = hostname_in
 
-  end subroutine clm_varctl_set
+  end subroutine set_clmvarctl
 
 !---------------------------------------------------------------------------
 !BOP
@@ -263,11 +219,11 @@ contains
        allocate_all_vegpfts = .true.
     else
        allocate_all_vegpfts = .false.
-       if (use_crop) then
-          write(iulog,*)'maxpatch_pft = ',maxpatch_pft,&
-               ' does NOT equal numpft+1 = ',numpft+1
-          call shr_sys_abort( subname//' ERROR:: Can NOT turn CROP on without all PFTs' )
-       end if
+#ifdef CROP
+       write(iulog,*)'maxpatch_pft = ',maxpatch_pft,' does NOT equal numpft+1 = ', &
+                      numpft+1
+       call shr_sys_abort( subname//' ERROR:: Can NOT turn CROP on without all PFTs' )
+#endif
     end if
 
     if (masterproc) then
@@ -281,17 +237,55 @@ contains
 
        ! Consistency settings for dynamic land use, etc.
 
-       if (flanduse_timeseries /= ' ' .and. create_crop_landunit) &
+       if (fpftdyn /= ' ' .and. create_crop_landunit) &
           call shr_sys_abort( subname//' ERROR:: dynamic landuse is currently not supported with create_crop_landunit option' )
        if (create_crop_landunit .and. .not.allocate_all_vegpfts) &
           call shr_sys_abort( subname//' ERROR:: maxpft<numpft+1 is currently not supported with create_crop_landunit option' )
-       if (flanduse_timeseries /= ' ') then
-          if (use_cndv) then
-             call shr_sys_abort( subname//' ERROR:: dynamic landuse is currently not supported with CNDV option' )
-          end if
+       if (fpftdyn /= ' ') then
+#if (defined CNDV)
+          call shr_sys_abort( subname//' ERROR:: dynamic landuse is currently not supported with CNDV option' )
+#elif (defined CASA)
+          call shr_sys_abort( subname//' ERROR:: dynamic landuse is currently not supported with CASA option' )
+#endif
        end if
 
+       if (create_glacier_mec_landunit) then
+
+#if (defined GLC_NEC_1)
+          glc_nec = 1
+#elif (defined GLC_NEC_3)
+          glc_nec = 3
+#elif (defined GLC_NEC_5)
+          glc_nec = 5
+#elif (defined GLC_NEC_10)
+          glc_nec = 10
+#else
+          call shr_sys_abort( subname//' ERROR:: glc_nec must be 1, 3, 5, or 10 to create glacier_mec landunit')
+#endif
+
+       else  ! no glacier_mec landunit
+
+          if (glc_nec /= 0) then
+             write(iulog,*) 'glc_nec =', glc_nec
+             call shr_sys_abort( subname//' ERROR:: no glacier_mec landunit; must have glc_nec = 0')
+          endif
+          if (glc_smb ) then
+             call shr_sys_abort( subname//' ERROR:: glc_smb true, but create_glacier_mec NOT true')
+          endif
+          if (glc_dyntopo) then
+             call shr_sys_abort( subname//' ERROR:: glc_dyntopo true, but create_glacier_mec NOT true')
+          endif
+
+       endif ! create_glacier_mec_landunit
+
+#if (defined RTM)
+       ! If rtm_nsteps was not entered in the namelist, give it the following default value
+
+       if (rtm_nsteps == iundef) rtm_nsteps = (3600*3)/dtime ! 3 hours
+#endif
+
        ! Check on run type
+
        if (nsrest == iundef) call shr_sys_abort( subname//' ERROR:: must set nsrest' )
        if (nsrest == nsrBranch .and. nrevsn == ' ') &
           call shr_sys_abort( subname//' ERROR: need to set restart data file name' )

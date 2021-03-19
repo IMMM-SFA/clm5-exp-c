@@ -55,9 +55,10 @@ contains
 ! For each land gridcell determine landunit, column and pft properties.
 !
 ! !USES
-    use clmtype 
-    use domainMod   , only : ldomain
-    use decompMod   , only : ldecomp, get_proc_global, get_proc_bounds
+    use clmtype     , only : clm3, gridcell_type, landunit_type, &
+                             column_type, pft_type
+    use domainMod   , only : ldomain, adomain, gatm
+    use decompMod   , only : ldecomp, adecomp, get_proc_global, get_proc_bounds
     use clm_varcon  , only : istsoil, istice, istwet, istdlak, isturb, istice_mec
     use clm_varctl  , only : create_glacier_mec_landunit
     use clm_varcon  , only : istcrop
@@ -108,10 +109,10 @@ contains
 
     ! Set pointers into derived types for this module
 
-    gptr => grc
-    lptr => lun
-    cptr => col
-    pptr => pft
+    gptr => clm3%g
+    lptr => clm3%g%l
+    cptr => clm3%g%l%c
+    pptr => clm3%g%l%c%p
 
     ! Get total global number of grid cells, landunits, columns and pfts 
     
@@ -221,6 +222,13 @@ contains
           gptr%lat(gdc)    = gptr%latdeg(gdc) * SHR_CONST_PI/180._r8  
           gptr%lon(gdc)    = gptr%londeg(gdc) * SHR_CONST_PI/180._r8
           gptr%area(gdc)   = ldomain%area(gdc)
+
+          na = adecomp%glo2gdc(gatm(glo))
+          gptr%gindex_a(gdc) = gatm(glo)
+          gptr%londeg_a(gdc) = adomain%lonc(na)
+          gptr%latdeg_a(gdc) = adomain%latc(na)
+          gptr%lon_a   (gdc) = gptr%londeg_a(gdc) * SHR_CONST_PI/180._r8  
+          gptr%lat_a   (gdc) = gptr%latdeg_a(gdc) * SHR_CONST_PI/180._r8  
        endif
 
     enddo
@@ -257,7 +265,8 @@ contains
 ! subroutine will set c_pi(1) = 1, c_pf(1) = 4, c_pi(2) = 5, c_pf(2) = 12.
 !
 ! !USES
-    use clmtype
+    use clmtype, only : clm3, gridcell_type, landunit_type, &
+                        column_type, pft_type
     use decompMod , only : get_proc_bounds
 
 ! !ARGUMENTS
@@ -281,10 +290,10 @@ contains
 !EOP
 !------------------------------------------------------------------------------
 
-    gptr => grc
-    lptr => lun
-    cptr => col
-    pptr => pft
+    gptr => clm3%g
+    lptr => clm3%g%l
+    cptr => clm3%g%l%c
+    pptr => clm3%g%l%c%p
 
     call get_proc_bounds(begg,endg,begl,endl,begc,endc,begp,endp)
 
@@ -389,7 +398,8 @@ contains
 ! Checks and writes out a summary of subgrid data
 !
 ! !USES
-    use clmtype
+    use clmtype, only : clm3, gridcell_type, landunit_type, &
+                        column_type, pft_type
     use decompMod , only : get_proc_bounds
 
 ! !ARGUMENTS
@@ -412,10 +422,10 @@ contains
 !EOP
 !------------------------------------------------------------------------------
 
-    gptr => grc
-    lptr => lun
-    cptr => col
-    pptr => pft
+    gptr => clm3%g
+    lptr => clm3%g%l
+    cptr => clm3%g%l%c
+    pptr => clm3%g%l%c%p
     
     if (masterproc) write(iulog,*) ' '
     if (masterproc) write(iulog,*) '---clm_ptrs_check:'
@@ -431,13 +441,6 @@ contains
     if (minval(gptr%pftf) < begp .or. maxval(gptr%pftf) > endp) error=.true.
     if (error) then
        write(iulog,*) '   clm_ptrs_check: g index ranges - ERROR'
-       write(iulog,*)'minval,beg,maxval,end'
-       write(iulog,*) minval(gptr%luni),begl,maxval(gptr%luni),endl
-       write(iulog,*) minval(gptr%lunf),begl,maxval(gptr%lunf),endl
-       write(iulog,*) minval(gptr%coli),begc,maxval(gptr%coli),endc
-       write(iulog,*) minval(gptr%colf),begc,maxval(gptr%colf),endc
-       write(iulog,*) minval(gptr%pfti),begp,maxval(gptr%pfti),endp
-       write(iulog,*) minval(gptr%pftf),begp,maxval(gptr%pftf),endp
        call endrun()
     endif
     if (masterproc) write(iulog,*) '   clm_ptrs_check: g index ranges - OK'
@@ -509,8 +512,8 @@ contains
     do c=begc+1,endc
       if (cptr%gridcell(c) < cptr%gridcell(c-1)) error = .true.
       if (cptr%landunit(c) < cptr%landunit(c-1)) error = .true.
-      if (cptr%pfti(c)     < cptr%pfti(c-1)) error = .true.
-      if (cptr%pftf(c)     < cptr%pftf(c-1)) error = .true.
+      if (cptr%pfti(c) < cptr%pfti(c-1)) error = .true.
+      if (cptr%pftf(c) < cptr%pftf(c-1)) error = .true.
       if (error) then
          write(iulog,*) '   clm_ptrs_check: c mono increasing - ERROR'
          call endrun()
@@ -568,7 +571,8 @@ end subroutine clm_ptrs_check
 ! Initialize vegetated landunit with competition
 !
 ! !USES
-    use clmtype 
+    use clmtype   , only : clm3, model_type, gridcell_type, landunit_type, &
+                           column_type,pft_type
     use subgridMod, only : subgrid_get_gcellinfo
     use clm_varpar, only : numpft, maxpatch_pft, numcft
     use clm_varctl, only : allocate_all_vegpfts, create_crop_landunit
@@ -613,9 +617,9 @@ end subroutine clm_ptrs_check
 
        ! Set pointers into derived types for this module
 
-       lptr => lun
-       cptr => col
-       pptr => pft
+       lptr => clm3%g%l
+       cptr => clm3%g%l%c
+       pptr => clm3%g%l%c%p
 
        ncols = 1
        
@@ -723,11 +727,13 @@ end subroutine clm_ptrs_check
 ! Initialize wet_ice_lake landunits that are non-urban (lake, wetland, glacier, glacier_mec)
 !
 ! !USES
-    use clmtype 
+    use clmtype   , only : clm3, model_type, gridcell_type, landunit_type, &
+                           column_type,pft_type
     use subgridMod, only : subgrid_get_gcellinfo
     use clm_varcon, only : istice, istwet, istdlak, istice_mec
     use clm_varpar, only : npatch_lake, npatch_glacier, npatch_wet
     use clm_varpar, only : npatch_glacier_mec
+    use clm_varctl, only : glc_nec 
 
 !
 ! !ARGUMENTS:
@@ -795,9 +801,9 @@ end subroutine clm_ptrs_check
 
        ! Set pointers into derived types for this module
 
-       lptr => lun
-       cptr => col
-       pptr => pft
+       lptr => clm3%g%l
+       cptr => clm3%g%l%c
+       pptr => clm3%g%l%c%p
 
        if (npfts /=1 .and. ltype /= istice_mec) then
           write(iulog,*)' set_landunit_wet_ice_lake: compete landunit must'// &
@@ -854,7 +860,7 @@ end subroutine clm_ptrs_check
 
                    ! Set sfc elevation too
 
-                   cps%glc_topo(ci) = topoxy(nw,m)
+                   cptr%cps%glc_topo(ci) = topoxy(nw,m)
 
                    ! Set pft properties
 
@@ -943,7 +949,8 @@ end subroutine clm_ptrs_check
 ! Initialize crop landunit without competition
 !
 ! !USES
-    use clmtype 
+    use clmtype   , only : clm3, model_type, gridcell_type, landunit_type, &
+                           column_type,pft_type
     use subgridMod, only : subgrid_get_gcellinfo
     use clm_varctl, only : create_crop_landunit
     use clm_varpar, only : maxpatch_pft, numcft, npatch_glacier_mec
@@ -985,9 +992,9 @@ end subroutine clm_ptrs_check
 
        ! Set pointers into derived types for this module
 
-       lptr => lun
-       cptr => col
-       pptr => pft
+       lptr => clm3%g%l
+       cptr => clm3%g%l%c
+       pptr => clm3%g%l%c%p
        
        ! Set landunit properties - each column has its own pft
        
@@ -1061,7 +1068,8 @@ end subroutine clm_ptrs_check
     use clm_varcon   , only : isturb, icol_roof, icol_sunwall, icol_shadewall, &
                               icol_road_perv, icol_road_imperv
     use clm_varpar   , only : npatch_urban, maxpatch_urb
-    use clmtype 
+    use clmtype      , only : clm3, model_type, gridcell_type, landunit_type, &
+                              column_type, pft_type
     use subgridMod   , only : subgrid_get_gcellinfo
     use UrbanInputMod, only : urbinp
     use decompMod    , only : ldecomp
@@ -1108,9 +1116,9 @@ end subroutine clm_ptrs_check
 
        ! Set pointers into derived types for this module
 
-       lptr => lun
-       cptr => col
-       pptr => pft
+       lptr => clm3%g%l
+       cptr => clm3%g%l%c
+       pptr => clm3%g%l%c%p
        
        ! Determine landunit properties - each columns has its own pft
        

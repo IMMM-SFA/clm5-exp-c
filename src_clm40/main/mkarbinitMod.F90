@@ -11,8 +11,7 @@ module mkarbinitMod
 
 ! !USES:
     use shr_kind_mod , only : r8 => shr_kind_r8
-    use clm_varctl   , only : iulog, use_cn, use_cndv, &
-                              use_vancouver, use_mexicocity
+    use clm_varctl   , only : iulog
     use shr_sys_mod  , only : shr_sys_flush
     use spmdMod      , only : masterproc
 
@@ -24,6 +23,7 @@ module mkarbinitMod
 ! !PUBLIC MEMBER FUNCTIONS:
 
     public mkarbinit   ! Make arbitrary initial conditions
+    public perturbIC   ! Perturb the initial conditions by pertlim
 
 !EOP
 !-----------------------------------------------------------------------
@@ -54,7 +54,7 @@ contains
                               icol_shadewall
     use clm_varcon   , only : istcrop
     use clm_varcon   , only : istice_mec, h2osno_max
-    use clm_varctl   , only : iulog
+    use clm_varctl   , only : iulog, pertlim
     use spmdMod      , only : masterproc
     use decompMod    , only : get_proc_bounds
     use SNICARMod    , only : snw_rds_min
@@ -95,7 +95,6 @@ contains
     real(r8), pointer :: wa(:)             ! water in the unconfined aquifer (mm)
     real(r8), pointer :: wt(:)             ! total water storage (unsaturated soil water + groundwater) (mm)
     real(r8), pointer :: zwt(:)            ! water table depth (m)
-    real(r8), pointer :: qflx_snow_melt(:)  ! snow melt (net)
 !
 ! local pointers to implicit out arguments
 !
@@ -165,78 +164,77 @@ contains
 
     ! Assign local pointers to derived subtypes components (landunit-level)
 
-    ltype      => lun%itype
-    lakpoi     => lun%lakpoi
-    ifspecial  => lun%ifspecial
-    urbpoi     => lun%urbpoi
+    ltype      => clm3%g%l%itype
+    lakpoi     => clm3%g%l%lakpoi
+    ifspecial  => clm3%g%l%ifspecial
+    urbpoi     => clm3%g%l%urbpoi
 
     ! Assign local pointers to derived subtypes components (column-level)
 
-    ctype            => col%itype
-    clandunit        => col%landunit
-    snl              => cps%snl
-    dz               => cps%dz
-    watsat           => cps%watsat
-    bsw2             => cps%bsw2
-    vwcsat           => cps%vwcsat
-    psisat           => cps%psisat
-    soilpsi          => cps%soilpsi
-    h2osoi_ice       => cws%h2osoi_ice
-    h2osoi_liq       => cws%h2osoi_liq
-    h2osoi_vol       => cws%h2osoi_vol
-    h2ocan_col       => pws_a%h2ocan
-    qflx_irrig       => cwf%qflx_irrig
-    qflx_snow_melt   => cwf%qflx_snow_melt
-    snowdp           => cps%snowdp
-    h2osno           => cws%h2osno
-    t_soisno         => ces%t_soisno
-    t_lake           => ces%t_lake
-    t_grnd           => ces%t_grnd
-    zi               => cps%zi
-    wa               => cws%wa
-    wt               => cws%wt
-    zwt              => cws%zwt
-    snw_rds          => cps%snw_rds
-    snw_rds_top      => cps%snw_rds_top
-    sno_liq_top      => cps%sno_liq_top
-    mss_bcpho        => cps%mss_bcpho
-    mss_bcphi        => cps%mss_bcphi
-    mss_bctot        => cps%mss_bctot
-    mss_bc_col       => cps%mss_bc_col
-    mss_bc_top       => cps%mss_bc_top
-    mss_cnc_bcphi    => cps%mss_cnc_bcphi
-    mss_cnc_bcpho    => cps%mss_cnc_bcpho
-    mss_ocpho        => cps%mss_ocpho
-    mss_ocphi        => cps%mss_ocphi
-    mss_octot        => cps%mss_octot
-    mss_oc_col       => cps%mss_oc_col
-    mss_oc_top       => cps%mss_oc_top
-    mss_cnc_ocphi    => cps%mss_cnc_ocphi
-    mss_cnc_ocpho    => cps%mss_cnc_ocpho
-    mss_dst1         => cps%mss_dst1
-    mss_dst2         => cps%mss_dst2
-    mss_dst3         => cps%mss_dst3
-    mss_dst4         => cps%mss_dst4
-    mss_dsttot       => cps%mss_dsttot
-    mss_dst_col      => cps%mss_dst_col
-    mss_dst_top      => cps%mss_dst_top
-    mss_cnc_dst1     => cps%mss_cnc_dst1
-    mss_cnc_dst2     => cps%mss_cnc_dst2
-    mss_cnc_dst3     => cps%mss_cnc_dst3
-    mss_cnc_dst4     => cps%mss_cnc_dst4
-    n_irrig_steps_left => cps%n_irrig_steps_left
-    irrig_rate       => cps%irrig_rate
+    ctype            => clm3%g%l%c%itype
+    clandunit        => clm3%g%l%c%landunit
+    snl              => clm3%g%l%c%cps%snl
+    dz               => clm3%g%l%c%cps%dz
+    watsat           => clm3%g%l%c%cps%watsat
+    bsw2             => clm3%g%l%c%cps%bsw2
+    vwcsat           => clm3%g%l%c%cps%vwcsat
+    psisat           => clm3%g%l%c%cps%psisat
+    soilpsi          => clm3%g%l%c%cps%soilpsi
+    h2osoi_ice       => clm3%g%l%c%cws%h2osoi_ice
+    h2osoi_liq       => clm3%g%l%c%cws%h2osoi_liq
+    h2osoi_vol       => clm3%g%l%c%cws%h2osoi_vol
+    h2ocan_col       => clm3%g%l%c%cws%pws_a%h2ocan
+    qflx_irrig       => clm3%g%l%c%cwf%qflx_irrig
+    snowdp           => clm3%g%l%c%cps%snowdp
+    h2osno           => clm3%g%l%c%cws%h2osno
+    t_soisno         => clm3%g%l%c%ces%t_soisno
+    t_lake           => clm3%g%l%c%ces%t_lake
+    t_grnd           => clm3%g%l%c%ces%t_grnd
+    zi               => clm3%g%l%c%cps%zi
+    wa               => clm3%g%l%c%cws%wa
+    wt               => clm3%g%l%c%cws%wt
+    zwt              => clm3%g%l%c%cws%zwt
+    snw_rds          => clm3%g%l%c%cps%snw_rds
+    snw_rds_top      => clm3%g%l%c%cps%snw_rds_top
+    sno_liq_top      => clm3%g%l%c%cps%sno_liq_top
+    mss_bcpho        => clm3%g%l%c%cps%mss_bcpho
+    mss_bcphi        => clm3%g%l%c%cps%mss_bcphi
+    mss_bctot        => clm3%g%l%c%cps%mss_bctot
+    mss_bc_col       => clm3%g%l%c%cps%mss_bc_col
+    mss_bc_top       => clm3%g%l%c%cps%mss_bc_top
+    mss_cnc_bcphi    => clm3%g%l%c%cps%mss_cnc_bcphi
+    mss_cnc_bcpho    => clm3%g%l%c%cps%mss_cnc_bcpho
+    mss_ocpho        => clm3%g%l%c%cps%mss_ocpho
+    mss_ocphi        => clm3%g%l%c%cps%mss_ocphi
+    mss_octot        => clm3%g%l%c%cps%mss_octot
+    mss_oc_col       => clm3%g%l%c%cps%mss_oc_col
+    mss_oc_top       => clm3%g%l%c%cps%mss_oc_top
+    mss_cnc_ocphi    => clm3%g%l%c%cps%mss_cnc_ocphi
+    mss_cnc_ocpho    => clm3%g%l%c%cps%mss_cnc_ocpho
+    mss_dst1         => clm3%g%l%c%cps%mss_dst1
+    mss_dst2         => clm3%g%l%c%cps%mss_dst2
+    mss_dst3         => clm3%g%l%c%cps%mss_dst3
+    mss_dst4         => clm3%g%l%c%cps%mss_dst4
+    mss_dsttot       => clm3%g%l%c%cps%mss_dsttot
+    mss_dst_col      => clm3%g%l%c%cps%mss_dst_col
+    mss_dst_top      => clm3%g%l%c%cps%mss_dst_top
+    mss_cnc_dst1     => clm3%g%l%c%cps%mss_cnc_dst1
+    mss_cnc_dst2     => clm3%g%l%c%cps%mss_cnc_dst2
+    mss_cnc_dst3     => clm3%g%l%c%cps%mss_cnc_dst3
+    mss_cnc_dst4     => clm3%g%l%c%cps%mss_cnc_dst4
+    n_irrig_steps_left => clm3%g%l%c%cps%n_irrig_steps_left
+    irrig_rate       => clm3%g%l%c%cps%irrig_rate
 
     ! Assign local pointers to derived subtypes components (pft-level)
 
-    pcolumn        => pft%column
-    h2ocan_pft     => pws%h2ocan
-    t_veg          => pes%t_veg
-    t_ref2m        => pes%t_ref2m
-    t_ref2m_u      => pes%t_ref2m_u
-    t_ref2m_r      => pes%t_ref2m_r
-    plandunit      => pft%landunit
-    eflx_lwrad_out => pef%eflx_lwrad_out  
+    pcolumn        => clm3%g%l%c%p%column
+    h2ocan_pft     => clm3%g%l%c%p%pws%h2ocan
+    t_veg          => clm3%g%l%c%p%pes%t_veg
+    t_ref2m        => clm3%g%l%c%p%pes%t_ref2m
+    t_ref2m_u      => clm3%g%l%c%p%pes%t_ref2m_u
+    t_ref2m_r      => clm3%g%l%c%p%pes%t_ref2m_r
+    plandunit      => clm3%g%l%c%p%landunit
+    eflx_lwrad_out => clm3%g%l%c%p%pef%eflx_lwrad_out  
 
     ! Determine subgrid bounds on this processor
 
@@ -249,13 +247,13 @@ contains
        h2ocan_pft(p) = 0._r8
        
        ! added for canopy water mass balance under dynamic pft weights
-       !pps%tlai(p) = 0._r8
-       !pps%tsai(p) = 0._r8
-       !pps%elai(p) = 0._r8
-       !pps%esai(p) = 0._r8
-       !pps%htop(p) = 0._r8
-       !pps%hbot(p) = 0._r8
-       !pps%frac_veg_nosno_alb(p) = 0._r8
+       !clm3%g%l%c%p%pps%tlai(p) = 0._r8
+       !clm3%g%l%c%p%pps%tsai(p) = 0._r8
+       !clm3%g%l%c%p%pps%elai(p) = 0._r8
+       !clm3%g%l%c%p%pps%esai(p) = 0._r8
+       !clm3%g%l%c%p%pps%htop(p) = 0._r8
+       !clm3%g%l%c%p%pps%hbot(p) = 0._r8
+       !clm3%g%l%c%p%pps%frac_veg_nosno_alb(p) = 0._r8
     end do
 
     do c = begc,endc
@@ -263,7 +261,6 @@ contains
        ! canopy water (column level)
 
        h2ocan_col(c) = 0._r8
-       qflx_snow_melt(c) = 0._r8
 
        ! snow water
 
@@ -327,53 +324,54 @@ contains
                 t_soisno(c,j) = 277._r8
              end do
           else if (ltype(l) == isturb) then
-             if (use_vancouver) then
-                if (ctype(c) == icol_road_perv .or. ctype(c) == icol_road_imperv) then 
-                   ! Set road top layer to initial air temperature and interpolate other
-                   ! layers down to 20C in bottom layer
-                   do j = 1, nlevurb
-                      t_soisno(c,j) = 297.56 - (j-1) * ((297.56-293.16)/(nlevurb-1)) 
-                   end do
-                   ! Set wall and roof layers to initial air temperature
-                else if (ctype(c) == icol_sunwall .or. ctype(c) == icol_shadewall .or. ctype(c) == icol_roof) then
-                   do j = 1, nlevurb
-                      t_soisno(c,j) = 297.56
-                   end do
-                else
-                   do j = 1, nlevurb
-                      t_soisno(c,j) = 283._r8
-                   end do
-                end if
-             else if (use_mexicocity) then
-                if (ctype(c) == icol_road_perv .or. ctype(c) == icol_road_imperv) then 
-                   ! Set road top layer to initial air temperature and interpolate other
-                   ! layers down to 22C in bottom layer
-                   do j = 1, nlevurb
-                      t_soisno(c,j) = 289.46 - (j-1) * ((289.46-295.16)/(nlevurb-1)) 
-                   end do
-                else if (ctype(c) == icol_sunwall .or. ctype(c) == icol_shadewall .or. ctype(c) == icol_roof) then
-                   ! Set wall and roof layers to initial air temperature
-                   do j = 1, nlevurb
-                      t_soisno(c,j) = 289.46
-                   end do
-                else
-                   do j = 1, nlevurb
-                      t_soisno(c,j) = 283._r8
-                   end do
-                end if
+#if (defined VANCOUVER)
+             if (ctype(c) == icol_road_perv .or. ctype(c) == icol_road_imperv) then 
+               ! Set road top layer to initial air temperature and interpolate other
+               ! layers down to 20C in bottom layer
+               do j = 1, nlevurb
+                  t_soisno(c,j) = 297.56 - (j-1) * ((297.56-293.16)/(nlevurb-1)) 
+               end do
+             ! Set wall and roof layers to initial air temperature
+             else if (ctype(c) == icol_sunwall .or. ctype(c) == icol_shadewall .or. ctype(c) == icol_roof) then
+               do j = 1, nlevurb
+                  t_soisno(c,j) = 297.56
+               end do
              else
-                if (ctype(c) == icol_road_perv .or. ctype(c) == icol_road_imperv) then 
-                   do j = 1, nlevurb
-                      t_soisno(c,j) = 274._r8
-                   end do
-                else if (ctype(c) == icol_sunwall .or. ctype(c) == icol_shadewall .or. ctype(c) == icol_roof) then
-                   ! Set sunwall, shadewall, roof to fairly high temperature to avoid initialization
-                   ! shock from large heating/air conditioning flux
-                   do j = 1, nlevurb
-                      t_soisno(c,j) = 292._r8
-                   end do
-                end if
+               do j = 1, nlevurb
+                  t_soisno(c,j) = 283._r8
+               end do
              end if
+#elif (defined MEXICOCITY)
+             if (ctype(c) == icol_road_perv .or. ctype(c) == icol_road_imperv) then 
+               ! Set road top layer to initial air temperature and interpolate other
+               ! layers down to 22C in bottom layer
+               do j = 1, nlevurb
+                  t_soisno(c,j) = 289.46 - (j-1) * ((289.46-295.16)/(nlevurb-1)) 
+               end do
+             ! Set wall and roof layers to initial air temperature
+             else if (ctype(c) == icol_sunwall .or. ctype(c) == icol_shadewall .or. ctype(c) == icol_roof) then
+               do j = 1, nlevurb
+                  t_soisno(c,j) = 289.46
+               end do
+             else
+               do j = 1, nlevurb
+                  t_soisno(c,j) = 283._r8
+               end do
+             end if
+#else
+             if (ctype(c) == icol_road_perv .or. ctype(c) == icol_road_imperv) then 
+               do j = 1, nlevurb
+                 t_soisno(c,j) = 274._r8
+               end do
+             ! Set sunwall, shadewall, roof to fairly high temperature to avoid initialization
+             ! shock from large heating/air conditioning flux
+             else if (ctype(c) == icol_sunwall .or. ctype(c) == icol_shadewall &
+                      .or. ctype(c) == icol_roof) then
+               do j = 1, nlevurb
+                 t_soisno(c,j) = 292._r8
+               end do
+             end if
+#endif
           else
              do j = 1, nlevgrnd
                 t_soisno(c,j) = 274._r8
@@ -387,6 +385,8 @@ contains
 
     end do
 
+    call perturbIC( clm3%g%l )
+
     do p = begp, endp
        c = pcolumn(p)
        l = plandunit(p)
@@ -396,46 +396,46 @@ contains
           qflx_irrig(c)      = 0.0_r8
        end if
 
-       if (use_vancouver) then
-          t_veg(p) = 297.56
-          t_ref2m(p) = 297.56
-          if (urbpoi(l)) then
-             t_ref2m_u(p) = 297.56
-          else
-             t_ref2m_u(p) = spval
-          end if
-          if (ifspecial(l)) then
-             t_ref2m_r(p) = spval
-          else
-             t_ref2m_r(p) = 297.56
-          end if
-       else if (use_mexicocity) then
-          t_veg(p) = 289.46
-          t_ref2m(p) = 289.46
-          if (urbpoi(l)) then
-             t_ref2m_u(p) = 289.46
-          else
-             t_ref2m_u(p) = spval
-          end if
-          if (ifspecial(l)) then
-             t_ref2m_r(p) = spval
-          else
-             t_ref2m_r(p) = 289.46
-          end if
+#if (defined VANCOUVER)
+       t_veg(p) = 297.56
+       t_ref2m(p) = 297.56
+       if (urbpoi(l)) then
+         t_ref2m_u(p) = 297.56
        else
-          t_veg(p) = 283._r8
-          t_ref2m(p) = 283._r8
-          if (urbpoi(l)) then
-             t_ref2m_u(p) = 283._r8
-          else
-             t_ref2m_u(p) = spval
-          end if
-          if (ifspecial(l)) then
-             t_ref2m_r(p) = spval
-          else
-             t_ref2m_r(p) = 283._r8
-          end if
+         t_ref2m_u(p) = spval
        end if
+       if (ifspecial(l)) then
+         t_ref2m_r(p) = spval
+       else
+         t_ref2m_r(p) = 297.56
+       end if 
+#elif (defined MEXICOCITY)
+       t_veg(p) = 289.46
+       t_ref2m(p) = 289.46
+       if (urbpoi(l)) then
+         t_ref2m_u(p) = 289.46
+       else
+         t_ref2m_u(p) = spval
+       end if
+       if (ifspecial(l)) then
+         t_ref2m_r(p) = spval
+       else
+         t_ref2m_r(p) = 289.46
+       end if 
+#else
+       t_veg(p) = 283._r8
+       t_ref2m(p) = 283._r8
+       if (urbpoi(l)) then
+         t_ref2m_u(p) = 283._r8
+       else
+         t_ref2m_u(p) = spval
+       end if
+       if (ifspecial(l)) then
+         t_ref2m_r(p) = spval
+       else
+         t_ref2m_r(p) = 283._r8
+       end if 
+#endif
        eflx_lwrad_out(p) = sb * (t_grnd(c))**4
     end do
 
@@ -525,22 +525,23 @@ contains
              endif
           end do
 
-          if (use_cn) then
-             ! soil water potential (added 10/21/03, PET)
-             ! required for CN code
-             if (ltype(l) == istsoil .or. ltype(l) == istcrop) then
-                nlevs = nlevgrnd
-                do j = 1, nlevs
-                   if (h2osoi_liq(c,j) > 0._r8) then
-                      vwc = h2osoi_liq(c,j)/(dz(c,j)*denh2o)
-                      psi = psisat(c,j) * (vwc/vwcsat(c,j))**bsw2(c,j)
-                      soilpsi(c,j) = max(psi, -15.0_r8)
-                      soilpsi(c,j) = min(soilpsi(c,j),0.0_r8)
-                   end if
-                end do
-             end if
+#if (defined CN) || (defined CASA)
+          ! soil water potential (added 10/21/03, PET)
+          ! required for CN and CASA code
+          if (ltype(l) == istsoil .or. ltype(l) == istcrop) then
+             nlevs = nlevgrnd
+             do j = 1, nlevs
+                if (h2osoi_liq(c,j) > 0._r8) then
+                   vwc = h2osoi_liq(c,j)/(dz(c,j)*denh2o)
+                   psi = psisat(c,j) * (vwc/vwcsat(c,j))**bsw2(c,j)
+                   soilpsi(c,j) = max(psi, -15.0_r8)
+                   soilpsi(c,j) = min(soilpsi(c,j),0.0_r8)
+                end if
+             end do
           end if
+#endif
        end if
+
     end do
 
     ! Set snow
@@ -605,6 +606,98 @@ contains
 !-----------------------------------------------------------------------
 !BOP
 !
+! !IROUTINE: perturbIC
+!
+! !INTERFACE:
+  subroutine perturbIC( landunit )
+!
+! !DESCRIPTION:
+!   Perturbs initial conditions by the amount in the namelist variable pertlim.
+!
+! !USES:
+    use clm_varpar   , only : nlevsoi, nlevgrnd, nlevsno, nlevlak, nlevurb
+    use clm_varctl   , only : pertlim
+    use clm_varcon   , only : isturb
+    use decompMod    , only : get_proc_bounds
+    use clmtype      , only : landunit_type
+    implicit none
+!
+! !ARGUMENTS:
+    type(landunit_type), intent(INOUT) :: landunit
+!
+! !REVISION HISTORY:
+! Created by Erik Kluzek
+!
+! !LOCAL VARIABLES:
+!
+    integer :: j,l,c        ! indices
+    integer :: begc, endc   ! per-proc beginning and ending column indices
+    real(r8):: pertval      ! for calculating temperature perturbation
+    integer :: nlevs        ! number of levels
+    integer , pointer :: clandunit(:)   ! landunit index associated with each column
+    integer , pointer :: ltype(:)       ! landunit type
+    logical , pointer :: lakpoi(:)      ! true => landunit is a lake point
+    integer , pointer :: snl(:)         ! number of snow layers
+    real(r8), pointer :: t_soisno(:,:)  ! soil temperature (Kelvin)  (-nlevsno+1:nlevgrnd)
+    real(r8), pointer :: t_lake(:,:)    ! lake temperature (Kelvin)  (1:nlevlak)
+    real(r8), pointer :: t_grnd(:)      ! ground temperature (Kelvin)
+!EOP
+!-----------------------------------------------------------------------
+
+    if ( pertlim /= 0.0_r8 )then
+
+       if ( masterproc ) write(iulog,*) 'Applying perturbation to initial soil temperature'
+
+       clandunit  => landunit%c%landunit
+       lakpoi     => landunit%lakpoi
+       ltype      => landunit%itype
+       t_soisno   => landunit%c%ces%t_soisno
+       t_lake     => landunit%c%ces%t_lake
+       t_grnd     => landunit%c%ces%t_grnd
+       snl        => landunit%c%cps%snl
+
+       ! Determine subgrid bounds on this processor
+
+       call get_proc_bounds( begc=begc, endc=endc )
+
+       do c = begc,endc
+          l = clandunit(c)
+          if (.not. lakpoi(l)) then  !not lake
+             if (     ltype(l) == isturb) then
+                nlevs = nlevurb
+             else
+                nlevs = nlevgrnd
+             end if
+             
+             ! Randomly perturb soil temperature
+             do j = 1, nlevs
+                call random_number (pertval)
+                pertval       = 2._r8*pertlim*(0.5_r8 - pertval)
+                t_soisno(c,j) = t_soisno(c,j)*(1._r8 + pertval)
+             end do
+          else                       !lake
+             ! Randomly perturb lake temperature
+             do j = 1, nlevlak
+                call random_number (pertval)
+                pertval     = 2._r8*pertlim*(0.5_r8 - pertval)
+                t_lake(c,j) = t_lake(c,j)*(1._r8 + pertval)
+             end do
+          endif
+          ! Randomly perturb surface ground temp
+          call random_number (pertval)
+          pertval   = 2._r8*pertlim*(0.5_r8 - pertval)
+          t_grnd(c) = t_grnd(c)*(1._r8 + pertval)
+       end do
+    end if
+    !-----------------------------------------------------------------------
+
+  end subroutine perturbIC
+
+!-----------------------------------------------------------------------
+
+!-----------------------------------------------------------------------
+!BOP
+!
 ! !ROUTINE: snowdp2lev
 !
 ! !INTERFACE:
@@ -649,16 +742,16 @@ contains
  
   ! Assign local pointers to derived subtypes components (landunit-level)
 
-  lakpoi => lun%lakpoi
+  lakpoi => clm3%g%l%lakpoi
 
   ! Assign local pointers to derived type members (column-level)
 
-  clandunit => col%landunit
-  snowdp    => cps%snowdp
-  snl       => cps%snl
-  zi        => cps%zi
-  dz        => cps%dz
-  z         => cps%z
+  clandunit => clm3%g%l%c%landunit
+  snowdp    => clm3%g%l%c%cps%snowdp
+  snl       => clm3%g%l%c%cps%snl
+  zi        => clm3%g%l%c%cps%zi
+  dz        => clm3%g%l%c%cps%dz
+  z         => clm3%g%l%c%cps%z
 
   ! Initialize snow levels and interfaces (lake and non-lake points)
 
@@ -756,6 +849,7 @@ contains
   end do
 
   end subroutine snowdp2lev
+
 
 !-----------------------------------------------------------------------
 

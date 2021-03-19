@@ -11,11 +11,11 @@ module pftdynMod
   use decompMod   , only : get_proc_bounds
   use clm_varsur  , only : pctspec
   use clm_varpar  , only : max_pft_per_col
-  use clm_varctl  , only : iulog, use_c13, use_cn, use_cndv
+  use clm_varctl  , only : iulog
   use shr_sys_mod , only : shr_sys_flush
   use shr_kind_mod, only : r8 => shr_kind_r8
   use abortutils  , only : endrun
-  use ncdio_pio   , only : file_desc_t, ncd_pio_openfile, ncd_inqdid, ncd_inqdlen, ncd_io, check_dim
+  use ncdio_pio
 !
 ! !DESCRIPTION:
 ! Determine pft weights at current time using dynamic landuse datasets.
@@ -29,11 +29,15 @@ module pftdynMod
   public :: pftdyn_interp
   public :: pftdyn_wbal_init
   public :: pftdyn_wbal
+#ifdef CN
   public :: pftdyn_cnbal
+#ifdef CNDV
   public :: pftwt_init
   public :: pftwt_interp
+#endif
   public :: CNHarvest
   public :: CNHarvestPftToColumn
+#endif
 !
 ! !REVISION HISTORY:
 ! Created by Peter Thornton
@@ -71,7 +75,7 @@ contains
 !
 ! !USES:
     use clm_time_manager, only : get_curr_date
-    use clm_varctl  , only : flanduse_timeseries
+    use clm_varctl  , only : fpftdyn
     use clm_varpar  , only : numpft, maxpatch_pft
     use fileutils   , only : getfil
 !
@@ -117,7 +121,7 @@ contains
 
     ! Set pointers into derived type
 
-    gptr => grc
+    gptr => clm3%g
 
     ! pctspec must be saved between time samples
     ! position to first time sample - assume that first time sample must match starting date
@@ -146,7 +150,7 @@ contains
     end if
 
     ! Obtain file
-    call getfil (flanduse_timeseries, locfn, 0)
+    call getfil (fpftdyn, locfn, 0)
     call ncd_pio_openfile (ncid, locfn, 0)
 
     ! Obtain pft years from dynamic landuse file
@@ -167,19 +171,19 @@ contains
 
     call ncd_io(ncid=ncid, varname='PCT_WETLAND', flag='read', data=pctwet, &
          dim1name=grlnd, readvar=readvar)
-    if (.not. readvar) call endrun( trim(subname)//' ERROR: PCT_WETLAND NOT on landuse_timeseries file' )
+    if (.not. readvar) call endrun( trim(subname)//' ERROR: PCT_WETLAND NOT on pftdyn file' )
 
     call ncd_io(ncid=ncid, varname= 'PCT_LAKE', flag='read', data=pctlak, &
          dim1name=grlnd, readvar=readvar)
-    if (.not. readvar) call endrun( trim(subname)//' ERROR: PCT_LAKE NOT on landuse_timeseries file' )
+    if (.not. readvar) call endrun( trim(subname)//' ERROR: PCT_LAKE NOT on pftdyn file' )
 
     call ncd_io(ncid=ncid, varname= 'PCT_GLACIER', flag='read', data=pctgla, &
          dim1name=grlnd, readvar=readvar)
-    if (.not. readvar) call endrun( trim(subname)//' ERROR: PCT_GLACIER NOT on landuse_timeseries file' )
+    if (.not. readvar) call endrun( trim(subname)//' ERROR: PCT_GLACIER NOT on pftdyn file' )
 
     call ncd_io(ncid=ncid, varname= 'PCT_URBAN'  , flag='read', data=pcturb, &
          dim1name=grlnd, readvar=readvar)
-    if (.not. readvar) call endrun( trim(subname)//' ERROR: PCT_URBAN NOT on landuse_timeseries file' )
+    if (.not. readvar) call endrun( trim(subname)//' ERROR: PCT_URBAN NOT on pftdyn file' )
 
     ! Consistency check
     do g = begg,endg
@@ -228,7 +232,7 @@ contains
           end if   
        end do
        if (.not. found) then
-          write(iulog,*) subname//' error: model year not found in landuse_timeseries file'
+          write(iulog,*) subname//' error: model year not found in pftdyn timeseries'
           write(iulog,*)'model year = ',year
           call endrun()
        end if
@@ -236,19 +240,13 @@ contains
 
     ! Get pctpft time samples bracketing the current time
 
-    if (masterproc) then
-       write(iulog,*) 'Get PFTDYN data for year: ', yearspft(nt1)
-    end if
     call pftdyn_getdata(nt1, wtpft1, begg,endg,0,numpft)
-    if (masterproc) then
-       write(iulog,*) 'Get PFTDYN data for year: ', yearspft(nt2)
-    end if
     call pftdyn_getdata(nt2, wtpft2, begg,endg,0,numpft)
     
-    if (use_cn) then
-       ! Get harvest rate at the nt1 time
-       call pftdyn_getharvest(nt1,begg,endg)
-    end if
+#ifdef CN
+    ! Get harvest rate at the nt1 time
+    call pftdyn_getharvest(nt1,begg,endg)
+#endif
 
     ! convert weights from percent to proportion
     do m = 0,numpft
@@ -307,9 +305,8 @@ contains
     integer  :: ier              ! error status
     integer  :: lbc,ubc
     real(r8) :: wt1              ! time interpolation weights
-    real(r8), pointer :: wtpfttot1(:)            ! summation of pft weights for renormalization
-    real(r8), pointer :: wtpfttot2(:)            ! summation of pft weights for renormalization
-    real(r8), parameter :: wtpfttol = 1.e-10     ! tolerance for pft weight renormalization
+    real(r8), pointer :: wtpfttot1(:)           ! summation of pft weights for renormalization
+    real(r8), pointer :: wtpfttot2(:)           ! summation of pft weights for renormalization
     type(gridcell_type), pointer :: gptr         ! pointer to gridcell derived subtype
     type(landunit_type), pointer :: lptr         ! pointer to landunit derived subtype
     type(pft_type)     , pointer :: pptr         ! pointer to pft derived subtype
@@ -320,9 +317,9 @@ contains
 
     ! Set pointers into derived type
 
-    gptr => grc
-    lptr => lun
-    pptr => pft
+    gptr => clm3%g
+    lptr => clm3%g%l
+    pptr => clm3%g%l%c%p
 
     allocate(wtpfttot1(begc:endc),wtpfttot2(begc:endc))
     wtpfttot1(:) = 0._r8
@@ -360,7 +357,7 @@ contains
           do_harvest = .false.
        endif
        
-       if (nt2 > ntimes .and. masterproc) then
+       if (nt2 > ntimes) then
           write(iulog,*)subname,' error - current year is past input data boundary'
        end if
        
@@ -370,13 +367,10 @@ contains
           end do
        end do
 
-       if (masterproc) then
-          write(iulog,*) 'Get PFTDYN data for year: ', yearspft(nt2)
-       end if
        call pftdyn_getdata(nt2, wtpft2, begg,endg,0,numpft)
-       if (use_cn) then
-          call pftdyn_getharvest(nt1,begg,endg)
-       end if
+#ifdef CN
+       call pftdyn_getharvest(nt1,begg,endg)
+#endif
 
        do m = 0,numpft
           do g = begg,endg
@@ -419,8 +413,7 @@ contains
        g = pptr%gridcell(p)
        l = pptr%landunit(p)
        if (lptr%itype(l) == istsoil .or. lptr%itype(l) == istcrop) then
-          if (wtpfttot2(c) /= 0 .and. &
-              abs(wtpfttot1(c)-wtpfttot2(c)) > wtpfttol) then
+          if (wtpfttot2(c) .ne. 0) then
              pptr%wtgcell(p)   = (wtpfttot1(c)/wtpfttot2(c))*pptr%wtgcell(p)
              pptr%wtlunit(p)   = pptr%wtgcell(p) / lptr%wtgcell(l)
              pptr%wtcol(p)     = pptr%wtgcell(p) / lptr%wtgcell(l)
@@ -466,6 +459,7 @@ contains
     character(len=32) :: subname='pftdyn_getdata' ! subroutine name
 !-----------------------------------------------------------------------
     
+    write(iulog,*) subname,' get next pftdyn data'
     allocate(arrayl(begg:endg,pft0:maxpft))	
     call ncd_io(ncid=ncid, varname= 'PCT_PFT', flag='read', data=arrayl, &
          dim1name=grlnd, nt=ntime, readvar=readvar)
@@ -498,6 +492,7 @@ contains
     
   end subroutine pftdyn_getdata
 
+#ifdef CN
 !-----------------------------------------------------------------------
 !BOP
 !
@@ -529,32 +524,33 @@ contains
     
     call ncd_io(ncid=ncid, varname= 'HARVEST_VH1', flag='read', data=arrayl, dim1name=grlnd, &
          nt=ntime, readvar=readvar)
-    if (.not. readvar) call endrun( trim(subname)//' ERROR: HARVEST_VH1 not on landuse_timeseries file' )
+    if (.not. readvar) call endrun( trim(subname)//' ERROR: HARVEST_VH1 not on pftdyn file' )
     harvest(begg:endg) = arrayl(begg:endg)
     
     call ncd_io(ncid=ncid, varname= 'HARVEST_VH2', flag='read', data=arrayl, dim1name=grlnd, &
          nt=ntime, readvar=readvar)
-    if (.not. readvar) call endrun( trim(subname)//' ERROR: HARVEST_VH2 not on landuse_timeseries file' )
+    if (.not. readvar) call endrun( trim(subname)//' ERROR: HARVEST_VH2 not on pftdyn file' )
     harvest(begg:endg) = harvest(begg:endg) + arrayl(begg:endg)
     
     call ncd_io(ncid=ncid, varname= 'HARVEST_SH1', flag='read', data=arrayl, dim1name=grlnd, &
          nt=ntime, readvar=readvar)
-    if (.not. readvar) call endrun( trim(subname)//' ERROR: HARVEST_SH1 not on landuse_timeseries file' )
+    if (.not. readvar) call endrun( trim(subname)//' ERROR: HARVEST_SH1 not on pftdyn file' )
     harvest(begg:endg) = harvest(begg:endg) + arrayl(begg:endg)
     
     call ncd_io(ncid=ncid, varname= 'HARVEST_SH2', flag='read', data=arrayl, dim1name=grlnd, &
          nt=ntime, readvar=readvar)
-    if (.not. readvar) call endrun( trim(subname)//' ERROR: HARVEST_SH2 not on landuse_timeseries file' )
+    if (.not. readvar) call endrun( trim(subname)//' ERROR: HARVEST_SH2 not on pftdyn file' )
     harvest(begg:endg) = harvest(begg:endg) + arrayl(begg:endg)
     
     call ncd_io(ncid=ncid, varname= 'HARVEST_SH3', flag='read', data=arrayl, dim1name=grlnd, &
          nt=ntime, readvar=readvar)
-    if (.not. readvar) call endrun( trim(subname)//' ERROR: HARVEST_SH3 not on landuse_timeseries file' )
+    if (.not. readvar) call endrun( trim(subname)//' ERROR: HARVEST_SH3 not on pftdyn file' )
     harvest(begg:endg) = harvest(begg:endg) + arrayl(begg:endg)
 
     deallocate(arrayl)
 
   end subroutine pftdyn_getharvest
+#endif
 
 !-----------------------------------------------------------------------
 !BOP
@@ -583,13 +579,13 @@ contains
 
     ! Set pointers into derived type
 
-    cptr => col
+    cptr => clm3%g%l%c
 
     ! set column-level canopy water mass balance correction flux
     ! term to 0 at the beginning of every timestep
     
     do c = begc,endc
-       cwf%h2ocan_loss(c) = 0._r8
+       cptr%cwf%h2ocan_loss(c) = 0._r8
     end do
     
   end subroutine pftdyn_wbal_init
@@ -640,9 +636,9 @@ contains
 
     ! Set pointers into derived type
 
-    lptr => lun
-    cptr => col
-    pptr => pft
+    lptr => clm3%g%l
+    cptr => clm3%g%l%c
+    pptr => clm3%g%l%c%p
 
     ! Allocate loss_h2ocan
     allocate(loss_h2ocan(begp:endp), stat=ier)
@@ -658,7 +654,7 @@ contains
     ! term to 0 at the beginning of every weight-shifting timestep
 
     do c = begc,endc
-       cwf%h2ocan_loss(c) = 0._r8 ! is this OR pftdyn_wbal_init redundant?
+       cptr%cwf%h2ocan_loss(c) = 0._r8 ! is this OR pftdyn_wbal_init redundant?
     end do
 
     do p = begp,endp
@@ -676,7 +672,7 @@ contains
              ! initial canopy water state is redistributed over the
              ! new (larger) area, conserving mass.
 
-             pws%h2ocan(p) = pws%h2ocan(p) * (wtcol_old(p)/pptr%wtcol(p))
+             pptr%pws%h2ocan(p) = pptr%pws%h2ocan(p) * (wtcol_old(p)/pptr%wtcol(p))
           
           else if (dwt < 0._r8) then
           
@@ -685,17 +681,17 @@ contains
              ! column-level flux term that gets added to the precip flux
              ! for every pft calculation in Hydrology1()
              
-             init_h2ocan = pws%h2ocan(p) * wtcol_old(p)
-             loss_h2ocan(p) = pws%h2ocan(p) * (-dwt)
+             init_h2ocan = pptr%pws%h2ocan(p) * wtcol_old(p)
+             loss_h2ocan(p) = pptr%pws%h2ocan(p) * (-dwt)
              new_h2ocan = init_h2ocan - loss_h2ocan(p)
              if (abs(new_h2ocan) < 1e-8_r8) then
                 new_h2ocan = 0._r8
                 loss_h2ocan(p) = init_h2ocan
              end if
              if (pptr%wtcol(p) /= 0._r8) then  
-                pws%h2ocan(p) = new_h2ocan/pptr%wtcol(p)
+                pptr%pws%h2ocan(p) = new_h2ocan/pptr%wtcol(p)
              else
-                pws%h2ocan(p) = 0._r8
+                pptr%pws%h2ocan(p) = 0._r8
                 loss_h2ocan(p) = init_h2ocan
              end if 
        
@@ -709,7 +705,7 @@ contains
        do c = begc,endc
           if (pi <= cptr%npfts(c)) then
              p = cptr%pfti(c) + pi - 1
-             cwf%h2ocan_loss(c) = cwf%h2ocan_loss(c) + loss_h2ocan(p)/dtime
+             cptr%cwf%h2ocan_loss(c) = cptr%cwf%h2ocan_loss(c) + loss_h2ocan(p)/dtime
           end if
        end do
     end do
@@ -719,6 +715,7 @@ contains
     
   end subroutine pftdyn_wbal
   
+#ifdef CN
 !-----------------------------------------------------------------------
 !BOP
 !
@@ -739,7 +736,9 @@ contains
     use clm_varcon  , only : istcrop
     use clm_varpar  , only : numveg, numpft
     use pftvarcon   , only : pconv, pprod10, pprod100
+#if (defined C13)
     use clm_varcon  , only : c13ratio
+#endif
     use clm_time_manager, only : get_step_size
 !
 ! !ARGUMENTS:
@@ -758,40 +757,52 @@ contains
     real(r8) :: new_h2ocan    ! canopy water mass after weight shift
     real(r8), allocatable :: dwt_leafc_seed(:)       ! pft-level mass gain due to seeding of new area
     real(r8), allocatable :: dwt_leafn_seed(:)       ! pft-level mass gain due to seeding of new area
+#if (defined C13)
     real(r8), allocatable :: dwt_leafc13_seed(:)     ! pft-level mass gain due to seeding of new area
+#endif
     real(r8), allocatable :: dwt_deadstemc_seed(:)       ! pft-level mass gain due to seeding of new area
     real(r8), allocatable :: dwt_deadstemn_seed(:)       ! pft-level mass gain due to seeding of new area
+#if (defined C13)
     real(r8), allocatable :: dwt_deadstemc13_seed(:)     ! pft-level mass gain due to seeding of new area
+#endif
     real(r8), allocatable :: dwt_frootc_to_litter(:)       ! pft-level mass loss due to weight shift
     real(r8), allocatable :: dwt_livecrootc_to_litter(:)   ! pft-level mass loss due to weight shift
     real(r8), allocatable :: dwt_deadcrootc_to_litter(:)   ! pft-level mass loss due to weight shift
+#if (defined C13)
     real(r8), allocatable, target :: dwt_frootc13_to_litter(:)     ! pft-level mass loss due to weight shift
     real(r8), allocatable, target :: dwt_livecrootc13_to_litter(:) ! pft-level mass loss due to weight shift
     real(r8), allocatable, target :: dwt_deadcrootc13_to_litter(:) ! pft-level mass loss due to weight shift
+#endif
     real(r8), allocatable, target :: dwt_frootn_to_litter(:)       ! pft-level mass loss due to weight shift
     real(r8), allocatable, target :: dwt_livecrootn_to_litter(:)   ! pft-level mass loss due to weight shift
     real(r8), allocatable, target :: dwt_deadcrootn_to_litter(:)   ! pft-level mass loss due to weight shift
     real(r8), allocatable :: conv_cflux(:)         ! pft-level mass loss due to weight shift
     real(r8), allocatable :: prod10_cflux(:)       ! pft-level mass loss due to weight shift
     real(r8), allocatable :: prod100_cflux(:)      ! pft-level mass loss due to weight shift
+#if (defined C13)
     real(r8), allocatable, target :: conv_c13flux(:)       ! pft-level mass loss due to weight shift
     real(r8), allocatable, target :: prod10_c13flux(:)     ! pft-level mass loss due to weight shift
     real(r8), allocatable, target :: prod100_c13flux(:)    ! pft-level mass loss due to weight shift
+#endif
     real(r8), allocatable, target :: conv_nflux(:)         ! pft-level mass loss due to weight shift
     real(r8), allocatable, target :: prod10_nflux(:)       ! pft-level mass loss due to weight shift
     real(r8), allocatable, target :: prod100_nflux(:)      ! pft-level mass loss due to weight shift
+#if (defined C13)
     real(r8) :: c3_del13c     ! typical del13C for C3 photosynthesis (permil, relative to PDB)
     real(r8) :: c4_del13c     ! typical del13C for C4 photosynthesis (permil, relative to PDB)
     real(r8) :: c3_r1         ! isotope ratio (13c/12c) for C3 photosynthesis
     real(r8) :: c4_r1         ! isotope ratio (13c/12c) for C4 photosynthesis
     real(r8) :: c3_r2         ! isotope ratio (13c/[12c+13c]) for C3 photosynthesis
     real(r8) :: c4_r2         ! isotope ratio (13c/[12c+13c]) for C4 photosynthesis
+#endif
     real(r8) :: t1,t2,wt_new,wt_old
     real(r8) :: init_state, change_state, new_state
-    real(r8) :: tot_leaf, pleaf, pstor, pxfer
-    real(r8) :: leafc_seed, leafn_seed
-    real(r8) :: deadstemc_seed, deadstemn_seed
-    real(r8) :: leafc13_seed, deadstemc13_seed
+	real(r8) :: tot_leaf, pleaf, pstor, pxfer
+	real(r8) :: leafc_seed, leafn_seed
+	real(r8) :: deadstemc_seed, deadstemn_seed
+#if (defined C13)
+        real(r8) :: leafc13_seed, deadstemc13_seed
+#endif
     real(r8), pointer :: dwt_ptr0, dwt_ptr1, dwt_ptr2, dwt_ptr3, ptr
     type(landunit_type), pointer :: lptr         ! pointer to landunit derived subtype
     type(column_type),   pointer :: cptr         ! pointer to column derived subtype
@@ -802,9 +813,9 @@ contains
     
     ! Set pointers into derived type
 
-    lptr    => lun
-    cptr    => col
-    pptr    => pft
+    lptr    => clm3%g%l
+    cptr    => clm3%g%l%c
+    pptr    => clm3%g%l%c%p
     pcolumn => pptr%column
 
     ! Allocate pft-level mass loss arrays
@@ -816,12 +827,12 @@ contains
     if (ier /= 0) then
           write(iulog,*)subname,' allocation error for dwt_leafn_seed'; call endrun()
     end if
-    if (use_c13) then
-       allocate(dwt_leafc13_seed(begp:endp), stat=ier)
-       if (ier /= 0) then
+#if (defined C13)
+    allocate(dwt_leafc13_seed(begp:endp), stat=ier)
+    if (ier /= 0) then
           write(iulog,*)subname,' allocation error for dwt_leafc13_seed'; call endrun()
-       end if
-    endif
+    end if
+#endif
     allocate(dwt_deadstemc_seed(begp:endp), stat=ier)
     if (ier /= 0) then
           write(iulog,*)subname,' allocation error for dwt_deadstemc_seed'; call endrun()
@@ -830,12 +841,12 @@ contains
     if (ier /= 0) then
           write(iulog,*)subname,' allocation error for dwt_deadstemn_seed'; call endrun()
     end if
-    if (use_c13) then
-       allocate(dwt_deadstemc13_seed(begp:endp), stat=ier)
-       if (ier /= 0) then
+#if (defined C13)
+    allocate(dwt_deadstemc13_seed(begp:endp), stat=ier)
+    if (ier /= 0) then
           write(iulog,*)subname,' allocation error for dwt_deadstemc13_seed'; call endrun()
-       end if
-    endif
+    end if
+#endif
     allocate(dwt_frootc_to_litter(begp:endp), stat=ier)
     if (ier /= 0) then
           write(iulog,*)subname,' allocation error for dwt_frootc_to_litter'; call endrun()
@@ -846,22 +857,22 @@ contains
     end if
     allocate(dwt_deadcrootc_to_litter(begp:endp), stat=ier)
     if (ier /= 0) then
-       write(iulog,*)subname,' allocation error for dwt_deadcrootc_to_litter'; call endrun()
+          write(iulog,*)subname,' allocation error for dwt_deadcrootc_to_litter'; call endrun()
     end if
-    if (use_c13) then
-       allocate(dwt_frootc13_to_litter(begp:endp), stat=ier)
-       if (ier /= 0) then
+#if (defined C13)
+    allocate(dwt_frootc13_to_litter(begp:endp), stat=ier)
+    if (ier /= 0) then
           write(iulog,*)subname,' allocation error for dwt_frootc13_to_litter'; call endrun()
-       end if
-       allocate(dwt_livecrootc13_to_litter(begp:endp), stat=ier)
-       if (ier /= 0) then
+    end if
+    allocate(dwt_livecrootc13_to_litter(begp:endp), stat=ier)
+    if (ier /= 0) then
           write(iulog,*)subname,' allocation error for dwt_livecrootc13_to_litter'; call endrun()
-       end if
-       allocate(dwt_deadcrootc13_to_litter(begp:endp), stat=ier)
-       if (ier /= 0) then
+    end if
+    allocate(dwt_deadcrootc13_to_litter(begp:endp), stat=ier)
+    if (ier /= 0) then
           write(iulog,*)subname,' allocation error for dwt_deadcrootc13_to_litter'; call endrun()
-       end if
-    endif
+    end if
+#endif
     allocate(dwt_frootn_to_litter(begp:endp), stat=ier)
     if (ier /= 0) then
           write(iulog,*)subname,' allocation error for dwt_frootn_to_litter'; call endrun()
@@ -886,20 +897,20 @@ contains
     if (ier /= 0) then
           write(iulog,*)subname,' allocation error for prod100_cflux'; call endrun()
     end if
-    if (use_c13) then
-       allocate(conv_c13flux(begp:endp), stat=ier)
-       if (ier /= 0) then
+#if (defined C13)
+    allocate(conv_c13flux(begp:endp), stat=ier)
+    if (ier /= 0) then
           write(iulog,*)subname,' allocation error for conv_c13flux'; call endrun()
-       end if
-       allocate(prod10_c13flux(begp:endp), stat=ier)
-       if (ier /= 0) then
+    end if
+    allocate(prod10_c13flux(begp:endp), stat=ier)
+    if (ier /= 0) then
           write(iulog,*)subname,' allocation error for prod10_c13flux'; call endrun()
-       end if
-       allocate(prod100_c13flux(begp:endp), stat=ier)
-       if (ier /= 0) then
+    end if
+    allocate(prod100_c13flux(begp:endp), stat=ier)
+    if (ier /= 0) then
           write(iulog,*)subname,' allocation error for prod100_c13flux'; call endrun()
-       end if
-    endif
+    end if
+#endif
     allocate(conv_nflux(begp:endp), stat=ier)
     if (ier /= 0) then
           write(iulog,*)subname,' allocation error for conv_nflux'; call endrun()
@@ -921,33 +932,33 @@ contains
 		! initialize all the pft-level local flux arrays
 		dwt_leafc_seed(p) = 0._r8
 		dwt_leafn_seed(p) = 0._r8
-                if (use_c13) then
-                   dwt_leafc13_seed(p) = 0._r8
-                endif
+#if (defined C13)
+		dwt_leafc13_seed(p) = 0._r8
+#endif
 		dwt_deadstemc_seed(p) = 0._r8
 		dwt_deadstemn_seed(p) = 0._r8
-                if (use_c13) then
-                   dwt_deadstemc13_seed(p) = 0._r8
-                endif
+#if (defined C13)
+		dwt_deadstemc13_seed(p) = 0._r8
+#endif
 		dwt_frootc_to_litter(p) = 0._r8
 		dwt_livecrootc_to_litter(p) = 0._r8
 		dwt_deadcrootc_to_litter(p) = 0._r8
-                if (use_c13) then
-                   dwt_frootc13_to_litter(p) = 0._r8
-                   dwt_livecrootc13_to_litter(p) = 0._r8
-                   dwt_deadcrootc13_to_litter(p) = 0._r8
-                endif
+#if (defined C13)
+		dwt_frootc13_to_litter(p) = 0._r8
+		dwt_livecrootc13_to_litter(p) = 0._r8
+		dwt_deadcrootc13_to_litter(p) = 0._r8
+#endif
 		dwt_frootn_to_litter(p) = 0._r8
 		dwt_livecrootn_to_litter(p) = 0._r8
 		dwt_deadcrootn_to_litter(p) = 0._r8
 		conv_cflux(p) = 0._r8
 		prod10_cflux(p) = 0._r8
 		prod100_cflux(p) = 0._r8
-                if (use_c13) then
-                   conv_c13flux(p) = 0._r8
-                   prod10_c13flux(p) = 0._r8
-                   prod100_c13flux(p) = 0._r8
-                endif
+#if (defined C13)
+		conv_c13flux(p) = 0._r8
+		prod10_c13flux(p) = 0._r8
+		prod100_c13flux(p) = 0._r8
+#endif
 		conv_nflux(p) = 0._r8
 		prod10_nflux(p) = 0._r8
 		prod100_nflux(p) = 0._r8
@@ -969,158 +980,158 @@ contains
 					! in this time step.  Based on the settings in cnIniTimeVar.
 
 					! pft-level carbon state variables
-					pcs%leafc(p)              = 0._r8
-					pcs%leafc_storage(p)      = 0._r8
-					pcs%leafc_xfer(p)         = 0._r8
-					pcs%frootc(p)             = 0._r8
-					pcs%frootc_storage(p)     = 0._r8
-					pcs%frootc_xfer(p)        = 0._r8
-					pcs%livestemc(p)          = 0._r8
-					pcs%livestemc_storage(p)  = 0._r8
-					pcs%livestemc_xfer(p)     = 0._r8
-					pcs%deadstemc(p)          = 0._r8
-					pcs%deadstemc_storage(p)  = 0._r8
-					pcs%deadstemc_xfer(p)     = 0._r8
-					pcs%livecrootc(p)         = 0._r8
-					pcs%livecrootc_storage(p) = 0._r8
-					pcs%livecrootc_xfer(p)    = 0._r8
-					pcs%deadcrootc(p)         = 0._r8
-					pcs%deadcrootc_storage(p) = 0._r8
-					pcs%deadcrootc_xfer(p)    = 0._r8
-					pcs%gresp_storage(p)      = 0._r8
-					pcs%gresp_xfer(p)         = 0._r8
-					pcs%cpool(p)              = 0._r8
-					pcs%xsmrpool(p)           = 0._r8
-					pcs%pft_ctrunc(p)         = 0._r8
-					pcs%dispvegc(p)           = 0._r8
-					pcs%storvegc(p)           = 0._r8
-					pcs%totvegc(p)            = 0._r8
-					pcs%totpftc(p)            = 0._r8
+					pptr%pcs%leafc(p)              = 0._r8
+					pptr%pcs%leafc_storage(p)      = 0._r8
+					pptr%pcs%leafc_xfer(p)         = 0._r8
+					pptr%pcs%frootc(p)             = 0._r8
+					pptr%pcs%frootc_storage(p)     = 0._r8
+					pptr%pcs%frootc_xfer(p)        = 0._r8
+					pptr%pcs%livestemc(p)          = 0._r8
+					pptr%pcs%livestemc_storage(p)  = 0._r8
+					pptr%pcs%livestemc_xfer(p)     = 0._r8
+					pptr%pcs%deadstemc(p)          = 0._r8
+					pptr%pcs%deadstemc_storage(p)  = 0._r8
+					pptr%pcs%deadstemc_xfer(p)     = 0._r8
+					pptr%pcs%livecrootc(p)         = 0._r8
+					pptr%pcs%livecrootc_storage(p) = 0._r8
+					pptr%pcs%livecrootc_xfer(p)    = 0._r8
+					pptr%pcs%deadcrootc(p)         = 0._r8
+					pptr%pcs%deadcrootc_storage(p) = 0._r8
+					pptr%pcs%deadcrootc_xfer(p)    = 0._r8
+					pptr%pcs%gresp_storage(p)      = 0._r8
+					pptr%pcs%gresp_xfer(p)         = 0._r8
+					pptr%pcs%cpool(p)              = 0._r8
+					pptr%pcs%xsmrpool(p)           = 0._r8
+					pptr%pcs%pft_ctrunc(p)         = 0._r8
+					pptr%pcs%dispvegc(p)           = 0._r8
+					pptr%pcs%storvegc(p)           = 0._r8
+					pptr%pcs%totvegc(p)            = 0._r8
+					pptr%pcs%totpftc(p)            = 0._r8
 
+#if (defined C13)
 					! pft-level carbon-13 state variables
-                                        if (use_c13) then
-                                           pc13s%leafc(p)              = 0._r8
-                                           pc13s%leafc_storage(p)      = 0._r8
-                                           pc13s%leafc_xfer(p)         = 0._r8
-                                           pc13s%frootc(p)             = 0._r8
-                                           pc13s%frootc_storage(p)     = 0._r8
-                                           pc13s%frootc_xfer(p)        = 0._r8
-                                           pc13s%livestemc(p)          = 0._r8
-                                           pc13s%livestemc_storage(p)  = 0._r8
-                                           pc13s%livestemc_xfer(p)     = 0._r8
-                                           pc13s%deadstemc(p)          = 0._r8
-                                           pc13s%deadstemc_storage(p)  = 0._r8
-                                           pc13s%deadstemc_xfer(p)     = 0._r8
-                                           pc13s%livecrootc(p)         = 0._r8
-                                           pc13s%livecrootc_storage(p) = 0._r8
-                                           pc13s%livecrootc_xfer(p)    = 0._r8
-                                           pc13s%deadcrootc(p)         = 0._r8
-                                           pc13s%deadcrootc_storage(p) = 0._r8
-                                           pc13s%deadcrootc_xfer(p)    = 0._r8
-                                           pc13s%gresp_storage(p)      = 0._r8
-                                           pc13s%gresp_xfer(p)         = 0._r8
-                                           pc13s%cpool(p)              = 0._r8
-                                           pc13s%xsmrpool(p)           = 0._r8
-                                           pc13s%pft_ctrunc(p)         = 0._r8
-                                           pc13s%dispvegc(p)           = 0._r8
-                                           pc13s%storvegc(p)           = 0._r8
-                                           pc13s%totvegc(p)            = 0._r8
-                                           pc13s%totpftc(p)            = 0._r8
-                                        endif
+					pptr%pc13s%leafc(p)              = 0._r8
+					pptr%pc13s%leafc_storage(p)      = 0._r8
+					pptr%pc13s%leafc_xfer(p)         = 0._r8
+					pptr%pc13s%frootc(p)             = 0._r8
+					pptr%pc13s%frootc_storage(p)     = 0._r8
+					pptr%pc13s%frootc_xfer(p)        = 0._r8
+					pptr%pc13s%livestemc(p)          = 0._r8
+					pptr%pc13s%livestemc_storage(p)  = 0._r8
+					pptr%pc13s%livestemc_xfer(p)     = 0._r8
+					pptr%pc13s%deadstemc(p)          = 0._r8
+					pptr%pc13s%deadstemc_storage(p)  = 0._r8
+					pptr%pc13s%deadstemc_xfer(p)     = 0._r8
+					pptr%pc13s%livecrootc(p)         = 0._r8
+					pptr%pc13s%livecrootc_storage(p) = 0._r8
+					pptr%pc13s%livecrootc_xfer(p)    = 0._r8
+					pptr%pc13s%deadcrootc(p)         = 0._r8
+					pptr%pc13s%deadcrootc_storage(p) = 0._r8
+					pptr%pc13s%deadcrootc_xfer(p)    = 0._r8
+					pptr%pc13s%gresp_storage(p)      = 0._r8
+					pptr%pc13s%gresp_xfer(p)         = 0._r8
+					pptr%pc13s%cpool(p)              = 0._r8
+					pptr%pc13s%xsmrpool(p)           = 0._r8
+					pptr%pc13s%pft_ctrunc(p)         = 0._r8
+					pptr%pc13s%dispvegc(p)           = 0._r8
+					pptr%pc13s%storvegc(p)           = 0._r8
+					pptr%pc13s%totvegc(p)            = 0._r8
+					pptr%pc13s%totpftc(p)            = 0._r8
+#endif
 
 					! pft-level nitrogen state variables
-					pns%leafn(p)	           = 0._r8
-					pns%leafn_storage(p)      = 0._r8
-					pns%leafn_xfer(p)         = 0._r8
-					pns%frootn(p)	           = 0._r8
-					pns%frootn_storage(p)     = 0._r8
-					pns%frootn_xfer(p)        = 0._r8
-					pns%livestemn(p)	       = 0._r8
-					pns%livestemn_storage(p)  = 0._r8
-					pns%livestemn_xfer(p)     = 0._r8
-					pns%deadstemn(p)	       = 0._r8
-					pns%deadstemn_storage(p)  = 0._r8
-					pns%deadstemn_xfer(p)     = 0._r8
-					pns%livecrootn(p)         = 0._r8
-					pns%livecrootn_storage(p) = 0._r8
-					pns%livecrootn_xfer(p)    = 0._r8
-					pns%deadcrootn(p)         = 0._r8
-					pns%deadcrootn_storage(p) = 0._r8
-					pns%deadcrootn_xfer(p)    = 0._r8
-					pns%retransn(p)	       = 0._r8
-					pns%npool(p)	           = 0._r8
-					pns%pft_ntrunc(p)         = 0._r8
-					pns%dispvegn(p)           = 0._r8
-					pns%storvegn(p)           = 0._r8
-					pns%totvegn(p)            = 0._r8
-					pns%totpftn (p)           = 0._r8
+					pptr%pns%leafn(p)	           = 0._r8
+					pptr%pns%leafn_storage(p)      = 0._r8
+					pptr%pns%leafn_xfer(p)         = 0._r8
+					pptr%pns%frootn(p)	           = 0._r8
+					pptr%pns%frootn_storage(p)     = 0._r8
+					pptr%pns%frootn_xfer(p)        = 0._r8
+					pptr%pns%livestemn(p)	       = 0._r8
+					pptr%pns%livestemn_storage(p)  = 0._r8
+					pptr%pns%livestemn_xfer(p)     = 0._r8
+					pptr%pns%deadstemn(p)	       = 0._r8
+					pptr%pns%deadstemn_storage(p)  = 0._r8
+					pptr%pns%deadstemn_xfer(p)     = 0._r8
+					pptr%pns%livecrootn(p)         = 0._r8
+					pptr%pns%livecrootn_storage(p) = 0._r8
+					pptr%pns%livecrootn_xfer(p)    = 0._r8
+					pptr%pns%deadcrootn(p)         = 0._r8
+					pptr%pns%deadcrootn_storage(p) = 0._r8
+					pptr%pns%deadcrootn_xfer(p)    = 0._r8
+					pptr%pns%retransn(p)	       = 0._r8
+					pptr%pns%npool(p)	           = 0._r8
+					pptr%pns%pft_ntrunc(p)         = 0._r8
+					pptr%pns%dispvegn(p)           = 0._r8
+					pptr%pns%storvegn(p)           = 0._r8
+					pptr%pns%totvegn(p)            = 0._r8
+					pptr%pns%totpftn (p)           = 0._r8
 
 					! initialize same flux and epv variables that are set
 					! in CNiniTimeVar
-					pcf%psnsun(p) = 0._r8
-					pcf%psnsha(p) = 0._r8
-                                        if (use_c13) then
-                                           pc13f%psnsun(p) = 0._r8
-                                           pc13f%psnsha(p) = 0._r8
-                                        endif
-					pps%laisun(p) = 0._r8
-					pps%laisha(p) = 0._r8
-					pps%lncsun(p) = 0._r8
-					pps%lncsha(p) = 0._r8
-					pps%vcmxsun(p) = 0._r8
-					pps%vcmxsha(p) = 0._r8
-                                        if (use_c13) then
-                                           pps%alphapsnsun(p) = 0._r8
-                                           pps%alphapsnsha(p) = 0._r8
-                                        endif
+					pptr%pcf%psnsun(p) = 0._r8
+					pptr%pcf%psnsha(p) = 0._r8
+#if (defined C13)
+					pptr%pc13f%psnsun(p) = 0._r8
+					pptr%pc13f%psnsha(p) = 0._r8
+#endif
+					pptr%pps%laisun(p) = 0._r8
+					pptr%pps%laisha(p) = 0._r8
+					pptr%pps%lncsun(p) = 0._r8
+					pptr%pps%lncsha(p) = 0._r8
+					pptr%pps%vcmxsun(p) = 0._r8
+					pptr%pps%vcmxsha(p) = 0._r8
+#if (defined C13)
+					pptr%pps%alphapsnsun(p) = 0._r8
+					pptr%pps%alphapsnsha(p) = 0._r8
+#endif
 
-					pepv%dormant_flag(p) = 1._r8
-					pepv%days_active(p) = 0._r8
-					pepv%onset_flag(p) = 0._r8
-					pepv%onset_counter(p) = 0._r8
-					pepv%onset_gddflag(p) = 0._r8
-					pepv%onset_fdd(p) = 0._r8
-					pepv%onset_gdd(p) = 0._r8
-					pepv%onset_swi(p) = 0.0_r8
-					pepv%offset_flag(p) = 0._r8
-					pepv%offset_counter(p) = 0._r8
-					pepv%offset_fdd(p) = 0._r8
-					pepv%offset_swi(p) = 0._r8
-					pepv%lgsf(p) = 0._r8
-					pepv%bglfr(p) = 0._r8
-					pepv%bgtr(p) = 0._r8
+					pptr%pepv%dormant_flag(p) = 1._r8
+					pptr%pepv%days_active(p) = 0._r8
+					pptr%pepv%onset_flag(p) = 0._r8
+					pptr%pepv%onset_counter(p) = 0._r8
+					pptr%pepv%onset_gddflag(p) = 0._r8
+					pptr%pepv%onset_fdd(p) = 0._r8
+					pptr%pepv%onset_gdd(p) = 0._r8
+					pptr%pepv%onset_swi(p) = 0.0_r8
+					pptr%pepv%offset_flag(p) = 0._r8
+					pptr%pepv%offset_counter(p) = 0._r8
+					pptr%pepv%offset_fdd(p) = 0._r8
+					pptr%pepv%offset_swi(p) = 0._r8
+					pptr%pepv%lgsf(p) = 0._r8
+					pptr%pepv%bglfr(p) = 0._r8
+					pptr%pepv%bgtr(p) = 0._r8
 					! difference from CNiniTimeVar: using column-level
 					! information to initialize annavg_t2m.
-					pepv%annavg_t2m(p) = cps%cannavg_t2m(c)
-					pepv%tempavg_t2m(p) = 0._r8
-					pepv%gpp(p) = 0._r8
-					pepv%availc(p) = 0._r8
-					pepv%xsmrpool_recover(p) = 0._r8
-                                        if (use_c13) then
-                                           pepv%xsmrpool_c13ratio(p) = c13ratio
-                                        endif
-					pepv%alloc_pnow(p) = 1._r8
-					pepv%c_allometry(p) = 0._r8
-					pepv%n_allometry(p) = 0._r8
-					pepv%plant_ndemand(p) = 0._r8
-					pepv%tempsum_potential_gpp(p) = 0._r8
-					pepv%annsum_potential_gpp(p) = 0._r8
-					pepv%tempmax_retransn(p) = 0._r8
-					pepv%annmax_retransn(p) = 0._r8
-					pepv%avail_retransn(p) = 0._r8
-					pepv%plant_nalloc(p) = 0._r8
-					pepv%plant_calloc(p) = 0._r8
-					pepv%excess_cflux(p) = 0._r8
-					pepv%downreg(p) = 0._r8
-					pepv%prev_leafc_to_litter(p) = 0._r8
-					pepv%prev_frootc_to_litter(p) = 0._r8
-					pepv%tempsum_npp(p) = 0._r8
-					pepv%annsum_npp(p) = 0._r8
-                                        if (use_c13) then
-                                           pepv%rc13_canair(p) = 0._r8
-                                           pepv%rc13_psnsun(p) = 0._r8
-                                           pepv%rc13_psnsha(p) = 0._r8
-                                        endif
+					pptr%pepv%annavg_t2m(p) = cptr%cps%cannavg_t2m(c)
+					pptr%pepv%tempavg_t2m(p) = 0._r8
+					pptr%pepv%gpp(p) = 0._r8
+					pptr%pepv%availc(p) = 0._r8
+					pptr%pepv%xsmrpool_recover(p) = 0._r8
+#if (defined C13)
+					pptr%pepv%xsmrpool_c13ratio(p) = c13ratio
+#endif
+					pptr%pepv%alloc_pnow(p) = 1._r8
+					pptr%pepv%c_allometry(p) = 0._r8
+					pptr%pepv%n_allometry(p) = 0._r8
+					pptr%pepv%plant_ndemand(p) = 0._r8
+					pptr%pepv%tempsum_potential_gpp(p) = 0._r8
+					pptr%pepv%annsum_potential_gpp(p) = 0._r8
+					pptr%pepv%tempmax_retransn(p) = 0._r8
+					pptr%pepv%annmax_retransn(p) = 0._r8
+					pptr%pepv%avail_retransn(p) = 0._r8
+					pptr%pepv%plant_nalloc(p) = 0._r8
+					pptr%pepv%plant_calloc(p) = 0._r8
+					pptr%pepv%excess_cflux(p) = 0._r8
+					pptr%pepv%downreg(p) = 0._r8
+					pptr%pepv%prev_leafc_to_litter(p) = 0._r8
+					pptr%pepv%prev_frootc_to_litter(p) = 0._r8
+					pptr%pepv%tempsum_npp(p) = 0._r8
+					pptr%pepv%annsum_npp(p) = 0._r8
+#if (defined C13)
+					pptr%pepv%rc13_canair(p) = 0._r8
+					pptr%pepv%rc13_psnsun(p) = 0._r8
+					pptr%pepv%rc13_psnsha(p) = 0._r8
+#endif
 
 				end if  ! end initialization of new pft
 
@@ -1130,14 +1141,14 @@ contains
 				! leaf source is split later between leaf, leaf_storage, leaf_xfer
 				leafc_seed   = 0._r8
 				leafn_seed   = 0._r8
-                                if (use_c13) then
-                                   leafc13_seed = 0._r8
-                                endif
+#if (defined C13)
+				leafc13_seed = 0._r8
+#endif
 				deadstemc_seed   = 0._r8
 				deadstemn_seed   = 0._r8
-                                if (use_c13) then
-                                   deadstemc13_seed = 0._r8
-                                endif
+#if (defined C13)
+				deadstemc13_seed = 0._r8
+#endif
 				if (pptr%itype(p) /= 0) then
 					leafc_seed = 1._r8
 					leafn_seed  = leafc_seed / pftcon%leafcn(pptr%itype(p))
@@ -1146,29 +1157,29 @@ contains
 						deadstemn_seed = deadstemc_seed / pftcon%deadwdcn(pptr%itype(p))
 					end if
 
-                                        if (use_c13) then
-                                           ! 13c state is initialized assuming del13c = -28 permil for C3, and -13 permil for C4.
-                                           ! That translates to ratios of (13c/(12c+13c)) of 0.01080455 for C3, and 0.01096945 for C4
-                                           ! based on the following formulae: 
-                                           ! r1 (13/12) = PDB + (del13c * PDB)/1000.0
-                                           ! r2 (13/(13+12)) = r1/(1+r1)
-                                           ! PDB = 0.0112372_R8  (ratio of 13C/12C in Pee Dee Belemnite, C isotope standard)
-                                           c3_del13c = -28._r8
-                                           c4_del13c = -13._r8
-                                           c3_r1 = SHR_CONST_PDB + ((c3_del13c*SHR_CONST_PDB)/1000._r8)
-                                           c3_r2 = c3_r1/(1._r8 + c3_r1)
-                                           c4_r1 = SHR_CONST_PDB + ((c4_del13c*SHR_CONST_PDB)/1000._r8)
-                                           c4_r2 = c4_r1/(1._r8 + c4_r1)
-                                           
-                                           if (pftcon%c3psn(pptr%itype(p)) == 1._r8) then
-                                              leafc13_seed     = leafc_seed     * c3_r2
-                                              deadstemc13_seed = deadstemc_seed * c3_r2
-                                           else
-                                              leafc13_seed     = leafc_seed     * c4_r2
-                                              deadstemc13_seed = deadstemc_seed * c4_r2
-                                           end if
-                                        endif
-                                     end if
+#if (defined C13)
+					! 13c state is initialized assuming del13c = -28 permil for C3, and -13 permil for C4.
+					! That translates to ratios of (13c/(12c+13c)) of 0.01080455 for C3, and 0.01096945 for C4
+					! based on the following formulae: 
+					! r1 (13/12) = PDB + (del13c * PDB)/1000.0
+					! r2 (13/(13+12)) = r1/(1+r1)
+					! PDB = 0.0112372_R8  (ratio of 13C/12C in Pee Dee Belemnite, C isotope standard)
+					c3_del13c = -28._r8
+					c4_del13c = -13._r8
+					c3_r1 = SHR_CONST_PDB + ((c3_del13c*SHR_CONST_PDB)/1000._r8)
+					c3_r2 = c3_r1/(1._r8 + c3_r1)
+					c4_r1 = SHR_CONST_PDB + ((c4_del13c*SHR_CONST_PDB)/1000._r8)
+					c4_r2 = c4_r1/(1._r8 + c4_r1)
+
+					if (pftcon%c3psn(pptr%itype(p)) == 1._r8) then
+						leafc13_seed     = leafc_seed     * c3_r2
+						deadstemc13_seed = deadstemc_seed * c3_r2
+					else
+						leafc13_seed     = leafc_seed     * c4_r2
+						deadstemc13_seed = deadstemc_seed * c4_r2
+					end if 
+#endif
+				end if
 
 				! When PFT area expands (dwt > 0), the pft-level mass density 
 				! is modified to conserve the original pft mass distributed
@@ -1177,15 +1188,15 @@ contains
 				t1 = wtcol_old(p)/pptr%wtcol(p)
 				t2 = dwt/pptr%wtcol(p)
 
-				tot_leaf = pcs%leafc(p) + pcs%leafc_storage(p) + pcs%leafc_xfer(p)
+				tot_leaf = pptr%pcs%leafc(p) + pptr%pcs%leafc_storage(p) + pptr%pcs%leafc_xfer(p)
 				pleaf = 0._r8
 				pstor = 0._r8
 				pxfer = 0._r8
 				if (tot_leaf /= 0._r8) then
 					! when adding seed source to non-zero leaf state, use current proportions
-					pleaf = pcs%leafc(p)/tot_leaf
-					pstor = pcs%leafc_storage(p)/tot_leaf
-					pxfer = pcs%leafc_xfer(p)/tot_leaf
+					pleaf = pptr%pcs%leafc(p)/tot_leaf
+					pstor = pptr%pcs%leafc_storage(p)/tot_leaf
+					pxfer = pptr%pcs%leafc_xfer(p)/tot_leaf
 				else
 					! when initiating from zero leaf state, use evergreen flag to set proportions
 					if (pftcon%evergreen(pptr%itype(p)) == 1._r8) then
@@ -1194,89 +1205,89 @@ contains
 						pstor = 1._r8
 					end if
 				end if 
-				pcs%leafc(p)         = pcs%leafc(p)*t1         + leafc_seed*pleaf*t2
-				pcs%leafc_storage(p) = pcs%leafc_storage(p)*t1 + leafc_seed*pstor*t2
-				pcs%leafc_xfer(p)    = pcs%leafc_xfer(p)*t1    + leafc_seed*pxfer*t2
-				pcs%frootc(p)  		   = pcs%frootc(p) 			* t1
-				pcs%frootc_storage(p)     = pcs%frootc_storage(p) 	* t1
-				pcs%frootc_xfer(p) 	   = pcs%frootc_xfer(p)		* t1
-				pcs%livestemc(p)		   = pcs%livestemc(p)  		* t1
-				pcs%livestemc_storage(p)  = pcs%livestemc_storage(p)  * t1
-				pcs%livestemc_xfer(p)     = pcs%livestemc_xfer(p) 	* t1
-				pcs%deadstemc(p)     = pcs%deadstemc(p)*t1     + deadstemc_seed*t2
-				pcs%deadstemc_storage(p)  = pcs%deadstemc_storage(p)  * t1
-				pcs%deadstemc_xfer(p)     = pcs%deadstemc_xfer(p) 	* t1
-				pcs%livecrootc(p)  	   = pcs%livecrootc(p) 		* t1
-				pcs%livecrootc_storage(p) = pcs%livecrootc_storage(p) * t1
-				pcs%livecrootc_xfer(p)    = pcs%livecrootc_xfer(p)	* t1
-				pcs%deadcrootc(p)  	   = pcs%deadcrootc(p) 		* t1
-				pcs%deadcrootc_storage(p) = pcs%deadcrootc_storage(p) * t1
-				pcs%deadcrootc_xfer(p)    = pcs%deadcrootc_xfer(p)	* t1
-				pcs%gresp_storage(p)	   = pcs%gresp_storage(p)  	* t1
-				pcs%gresp_xfer(p)  	   = pcs%gresp_xfer(p) 		* t1
-				pcs%cpool(p)			   = pcs%cpool(p)  			* t1
-				pcs%xsmrpool(p)		   = pcs%xsmrpool(p)			* t1
-				pcs%pft_ctrunc(p)  	   = pcs%pft_ctrunc(p) 		* t1
-				pcs%dispvegc(p)		   = pcs%dispvegc(p)			* t1
-				pcs%storvegc(p)		   = pcs%storvegc(p)			* t1
-				pcs%totvegc(p) 		   = pcs%totvegc(p)			* t1
-				pcs%totpftc(p) 		   = pcs%totpftc(p)			* t1
+				pptr%pcs%leafc(p)         = pptr%pcs%leafc(p)*t1         + leafc_seed*pleaf*t2
+				pptr%pcs%leafc_storage(p) = pptr%pcs%leafc_storage(p)*t1 + leafc_seed*pstor*t2
+				pptr%pcs%leafc_xfer(p)    = pptr%pcs%leafc_xfer(p)*t1    + leafc_seed*pxfer*t2
+				pptr%pcs%frootc(p)  		   = pptr%pcs%frootc(p) 			* t1
+				pptr%pcs%frootc_storage(p)     = pptr%pcs%frootc_storage(p) 	* t1
+				pptr%pcs%frootc_xfer(p) 	   = pptr%pcs%frootc_xfer(p)		* t1
+				pptr%pcs%livestemc(p)		   = pptr%pcs%livestemc(p)  		* t1
+				pptr%pcs%livestemc_storage(p)  = pptr%pcs%livestemc_storage(p)  * t1
+				pptr%pcs%livestemc_xfer(p)     = pptr%pcs%livestemc_xfer(p) 	* t1
+				pptr%pcs%deadstemc(p)     = pptr%pcs%deadstemc(p)*t1     + deadstemc_seed*t2
+				pptr%pcs%deadstemc_storage(p)  = pptr%pcs%deadstemc_storage(p)  * t1
+				pptr%pcs%deadstemc_xfer(p)     = pptr%pcs%deadstemc_xfer(p) 	* t1
+				pptr%pcs%livecrootc(p)  	   = pptr%pcs%livecrootc(p) 		* t1
+				pptr%pcs%livecrootc_storage(p) = pptr%pcs%livecrootc_storage(p) * t1
+				pptr%pcs%livecrootc_xfer(p)    = pptr%pcs%livecrootc_xfer(p)	* t1
+				pptr%pcs%deadcrootc(p)  	   = pptr%pcs%deadcrootc(p) 		* t1
+				pptr%pcs%deadcrootc_storage(p) = pptr%pcs%deadcrootc_storage(p) * t1
+				pptr%pcs%deadcrootc_xfer(p)    = pptr%pcs%deadcrootc_xfer(p)	* t1
+				pptr%pcs%gresp_storage(p)	   = pptr%pcs%gresp_storage(p)  	* t1
+				pptr%pcs%gresp_xfer(p)  	   = pptr%pcs%gresp_xfer(p) 		* t1
+				pptr%pcs%cpool(p)			   = pptr%pcs%cpool(p)  			* t1
+				pptr%pcs%xsmrpool(p)		   = pptr%pcs%xsmrpool(p)			* t1
+				pptr%pcs%pft_ctrunc(p)  	   = pptr%pcs%pft_ctrunc(p) 		* t1
+				pptr%pcs%dispvegc(p)		   = pptr%pcs%dispvegc(p)			* t1
+				pptr%pcs%storvegc(p)		   = pptr%pcs%storvegc(p)			* t1
+				pptr%pcs%totvegc(p) 		   = pptr%pcs%totvegc(p)			* t1
+				pptr%pcs%totpftc(p) 		   = pptr%pcs%totpftc(p)			* t1
 
+#if (defined C13)
 				! pft-level carbon-13 state variables 
-                                if (use_c13) then
-                                   tot_leaf = pc13s%leafc(p) + pc13s%leafc_storage(p) + pc13s%leafc_xfer(p)
-                                   pleaf = 0._r8
-                                   pstor = 0._r8
-                                   pxfer = 0._r8
-                                   if (tot_leaf /= 0._r8) then
-                                      pleaf = pc13s%leafc(p)/tot_leaf
-                                      pstor = pc13s%leafc_storage(p)/tot_leaf
-                                      pxfer = pc13s%leafc_xfer(p)/tot_leaf
-                                   else
-                                      ! when initiating from zero leaf state, use evergreen flag to set proportions
-                                      if (pftcon%evergreen(pptr%itype(p)) == 1._r8) then
-                                         pleaf = 1._r8
-                                      else
-                                         pstor = 1._r8
-                                      end if
-                                   end if
-                                   pc13s%leafc(p)         = pc13s%leafc(p)*t1         + leafc13_seed*pleaf*t2
-                                   pc13s%leafc_storage(p) = pc13s%leafc_storage(p)*t1 + leafc13_seed*pstor*t2
-                                   pc13s%leafc_xfer(p)    = pc13s%leafc_xfer(p)*t1    + leafc13_seed*pxfer*t2
-                                   pc13s%frootc(p)			 = pc13s%frootc(p) 		* t1
-                                   pc13s%frootc_storage(p)	         = pc13s%frootc_storage(p) 	* t1
-                                   pc13s%frootc_xfer(p)		 = pc13s%frootc_xfer(p)		* t1
-                                   pc13s%livestemc(p) 		 = pc13s%livestemc(p)  		* t1
-                                   pc13s%livestemc_storage(p)       = pc13s%livestemc_storage(p)      * t1
-                                   pc13s%livestemc_xfer(p)	         = pc13s%livestemc_xfer(p) 	* t1
-                                   pc13s%deadstemc(p)               = pc13s%deadstemc(p)*t1     + deadstemc13_seed*t2
-                                   pc13s%deadstemc_storage(p)       = pc13s%deadstemc_storage(p)      * t1
-                                   pc13s%deadstemc_xfer(p)	         = pc13s%deadstemc_xfer(p) 	* t1
-                                   pc13s%livecrootc(p)		 = pc13s%livecrootc(p) 		* t1
-                                   pc13s%livecrootc_storage(p)      = pc13s%livecrootc_storage(p)     * t1
-                                   pc13s%livecrootc_xfer(p)         = pc13s%livecrootc_xfer(p)	* t1
-                                   pc13s%deadcrootc(p)		 = pc13s%deadcrootc(p) 		* t1
-                                   pc13s%deadcrootc_storage(p)      = pc13s%deadcrootc_storage(p)     * t1
-                                   pc13s%deadcrootc_xfer(p)         = pc13s%deadcrootc_xfer(p)	* t1
-                                   pc13s%gresp_storage(p) 	         = pc13s%gresp_storage(p)  	* t1
-                                   pc13s%gresp_xfer(p)		 = pc13s%gresp_xfer(p) 		* t1
-                                   pc13s%cpool(p) 			 = pc13s%cpool(p)  		* t1
-                                   pc13s%xsmrpool(p)  		 = pc13s%xsmrpool(p)		* t1
-                                   pc13s%pft_ctrunc(p)		 = pc13s%pft_ctrunc(p) 		* t1
-                                   pc13s%dispvegc(p)  		 = pc13s%dispvegc(p)		* t1
-                                   pc13s%storvegc(p)  		 = pc13s%storvegc(p)		* t1
-                                   pc13s%totvegc(p)		 = pc13s%totvegc(p)		* t1
-                                   pc13s%totpftc(p)		 = pc13s%totpftc(p)		* t1
-                                endif
-
-				tot_leaf = pns%leafn(p) + pns%leafn_storage(p) + pns%leafn_xfer(p)
+				tot_leaf = pptr%pc13s%leafc(p) + pptr%pc13s%leafc_storage(p) + pptr%pc13s%leafc_xfer(p)
 				pleaf = 0._r8
 				pstor = 0._r8
 				pxfer = 0._r8
 				if (tot_leaf /= 0._r8) then
-					pleaf = pns%leafn(p)/tot_leaf
-					pstor = pns%leafn_storage(p)/tot_leaf
-					pxfer = pns%leafn_xfer(p)/tot_leaf
+					pleaf = pptr%pc13s%leafc(p)/tot_leaf
+					pstor = pptr%pc13s%leafc_storage(p)/tot_leaf
+					pxfer = pptr%pc13s%leafc_xfer(p)/tot_leaf
+				else
+					! when initiating from zero leaf state, use evergreen flag to set proportions
+					if (pftcon%evergreen(pptr%itype(p)) == 1._r8) then
+						pleaf = 1._r8
+					else
+						pstor = 1._r8
+					end if
+				end if 
+				pptr%pc13s%leafc(p)         = pptr%pc13s%leafc(p)*t1         + leafc13_seed*pleaf*t2
+				pptr%pc13s%leafc_storage(p) = pptr%pc13s%leafc_storage(p)*t1 + leafc13_seed*pstor*t2
+				pptr%pc13s%leafc_xfer(p)    = pptr%pc13s%leafc_xfer(p)*t1    + leafc13_seed*pxfer*t2
+				pptr%pc13s%frootc(p)			 = pptr%pc13s%frootc(p) 		* t1
+				pptr%pc13s%frootc_storage(p)	         = pptr%pc13s%frootc_storage(p) 	* t1
+				pptr%pc13s%frootc_xfer(p)		 = pptr%pc13s%frootc_xfer(p)		* t1
+				pptr%pc13s%livestemc(p) 		 = pptr%pc13s%livestemc(p)  		* t1
+				pptr%pc13s%livestemc_storage(p)          = pptr%pc13s%livestemc_storage(p)      * t1
+				pptr%pc13s%livestemc_xfer(p)	         = pptr%pc13s%livestemc_xfer(p) 	* t1
+				pptr%pc13s%deadstemc(p)                  = pptr%pc13s%deadstemc(p)*t1     + deadstemc13_seed*t2
+				pptr%pc13s%deadstemc_storage(p)          = pptr%pc13s%deadstemc_storage(p)      * t1
+				pptr%pc13s%deadstemc_xfer(p)	         = pptr%pc13s%deadstemc_xfer(p) 	* t1
+				pptr%pc13s%livecrootc(p)		 = pptr%pc13s%livecrootc(p) 		* t1
+				pptr%pc13s%livecrootc_storage(p)         = pptr%pc13s%livecrootc_storage(p)     * t1
+				pptr%pc13s%livecrootc_xfer(p)	         = pptr%pc13s%livecrootc_xfer(p)	* t1
+				pptr%pc13s%deadcrootc(p)		 = pptr%pc13s%deadcrootc(p) 		* t1
+				pptr%pc13s%deadcrootc_storage(p)         = pptr%pc13s%deadcrootc_storage(p)     * t1
+				pptr%pc13s%deadcrootc_xfer(p)	         = pptr%pc13s%deadcrootc_xfer(p)	* t1
+				pptr%pc13s%gresp_storage(p) 	         = pptr%pc13s%gresp_storage(p)  	* t1
+				pptr%pc13s%gresp_xfer(p)		 = pptr%pc13s%gresp_xfer(p) 		* t1
+				pptr%pc13s%cpool(p) 			 = pptr%pc13s%cpool(p)  		* t1
+				pptr%pc13s%xsmrpool(p)  		 = pptr%pc13s%xsmrpool(p)		* t1
+				pptr%pc13s%pft_ctrunc(p)		 = pptr%pc13s%pft_ctrunc(p) 		* t1
+				pptr%pc13s%dispvegc(p)  		 = pptr%pc13s%dispvegc(p)		* t1
+				pptr%pc13s%storvegc(p)  		 = pptr%pc13s%storvegc(p)		* t1
+				pptr%pc13s%totvegc(p)			 = pptr%pc13s%totvegc(p)		* t1
+				pptr%pc13s%totpftc(p)			 = pptr%pc13s%totpftc(p)		* t1
+#endif
+
+				tot_leaf = pptr%pns%leafn(p) + pptr%pns%leafn_storage(p) + pptr%pns%leafn_xfer(p)
+				pleaf = 0._r8
+				pstor = 0._r8
+				pxfer = 0._r8
+				if (tot_leaf /= 0._r8) then
+					pleaf = pptr%pns%leafn(p)/tot_leaf
+					pstor = pptr%pns%leafn_storage(p)/tot_leaf
+					pxfer = pptr%pns%leafn_xfer(p)/tot_leaf
 				else
 					! when initiating from zero leaf state, use evergreen flag to set proportions
 					if (pftcon%evergreen(pptr%itype(p)) == 1._r8) then
@@ -1286,44 +1297,44 @@ contains
 					end if
 				end if 
 				! pft-level nitrogen state variables
-				pns%leafn(p)         = pns%leafn(p)*t1         + leafn_seed*pleaf*t2
-				pns%leafn_storage(p) = pns%leafn_storage(p)*t1 + leafn_seed*pstor*t2
-				pns%leafn_xfer(p)    = pns%leafn_xfer(p)*t1    + leafn_seed*pxfer*t2
-				pns%frootn(p)  		   = pns%frootn(p) 		* t1
-				pns%frootn_storage(p)         = pns%frootn_storage(p) 	* t1
-				pns%frootn_xfer(p) 	   = pns%frootn_xfer(p)		* t1
-				pns%livestemn(p)		   = pns%livestemn(p)  		* t1
-				pns%livestemn_storage(p)      = pns%livestemn_storage(p)      * t1
-				pns%livestemn_xfer(p)         = pns%livestemn_xfer(p) 	* t1
-				pns%deadstemn(p)              = pns%deadstemn(p)*t1     + deadstemn_seed*t2
-				pns%deadstemn_storage(p)      = pns%deadstemn_storage(p)      * t1
-				pns%deadstemn_xfer(p)         = pns%deadstemn_xfer(p) 	* t1
-				pns%livecrootn(p)  	   = pns%livecrootn(p) 		* t1
-				pns%livecrootn_storage(p)     = pns%livecrootn_storage(p)     * t1
-				pns%livecrootn_xfer(p)        = pns%livecrootn_xfer(p)	* t1
-				pns%deadcrootn(p)  	   = pns%deadcrootn(p) 		* t1
-				pns%deadcrootn_storage(p)     = pns%deadcrootn_storage(p)     * t1
-				pns%deadcrootn_xfer(p)        = pns%deadcrootn_xfer(p)        * t1
-				pns%retransn(p)		   = pns%retransn(p)		* t1
-				pns%npool(p)		   = pns%npool(p)  		* t1
-				pns%pft_ntrunc(p)  	   = pns%pft_ntrunc(p)        	* t1
-				pns%dispvegn(p)		   = pns%dispvegn(p)		* t1
-				pns%storvegn(p)		   = pns%storvegn(p)		* t1
-				pns%totvegn(p) 		   = pns%totvegn(p)		* t1
-				pns%totpftn(p) 		   = pns%totpftn(p)		* t1
+				pptr%pns%leafn(p)         = pptr%pns%leafn(p)*t1         + leafn_seed*pleaf*t2
+				pptr%pns%leafn_storage(p) = pptr%pns%leafn_storage(p)*t1 + leafn_seed*pstor*t2
+				pptr%pns%leafn_xfer(p)    = pptr%pns%leafn_xfer(p)*t1    + leafn_seed*pxfer*t2
+				pptr%pns%frootn(p)  		   = pptr%pns%frootn(p) 		* t1
+				pptr%pns%frootn_storage(p)         = pptr%pns%frootn_storage(p) 	* t1
+				pptr%pns%frootn_xfer(p) 	   = pptr%pns%frootn_xfer(p)		* t1
+				pptr%pns%livestemn(p)		   = pptr%pns%livestemn(p)  		* t1
+				pptr%pns%livestemn_storage(p)      = pptr%pns%livestemn_storage(p)      * t1
+				pptr%pns%livestemn_xfer(p)         = pptr%pns%livestemn_xfer(p) 	* t1
+				pptr%pns%deadstemn(p)              = pptr%pns%deadstemn(p)*t1     + deadstemn_seed*t2
+				pptr%pns%deadstemn_storage(p)      = pptr%pns%deadstemn_storage(p)      * t1
+				pptr%pns%deadstemn_xfer(p)         = pptr%pns%deadstemn_xfer(p) 	* t1
+				pptr%pns%livecrootn(p)  	   = pptr%pns%livecrootn(p) 		* t1
+				pptr%pns%livecrootn_storage(p)     = pptr%pns%livecrootn_storage(p)     * t1
+				pptr%pns%livecrootn_xfer(p)        = pptr%pns%livecrootn_xfer(p)	* t1
+				pptr%pns%deadcrootn(p)  	   = pptr%pns%deadcrootn(p) 		* t1
+				pptr%pns%deadcrootn_storage(p)     = pptr%pns%deadcrootn_storage(p)     * t1
+				pptr%pns%deadcrootn_xfer(p)        = pptr%pns%deadcrootn_xfer(p)        * t1
+				pptr%pns%retransn(p)		   = pptr%pns%retransn(p)		* t1
+				pptr%pns%npool(p)		   = pptr%pns%npool(p)  		* t1
+				pptr%pns%pft_ntrunc(p)  	   = pptr%pns%pft_ntrunc(p)        	* t1
+				pptr%pns%dispvegn(p)		   = pptr%pns%dispvegn(p)		* t1
+				pptr%pns%storvegn(p)		   = pptr%pns%storvegn(p)		* t1
+				pptr%pns%totvegn(p) 		   = pptr%pns%totvegn(p)		* t1
+				pptr%pns%totpftn(p) 		   = pptr%pns%totpftn(p)		* t1
 
 				! update temporary seed source arrays
 				! These are calculated in terms of the required contributions from
 				! column-level seed source
 				dwt_leafc_seed(p)   = leafc_seed   * dwt
-                                if (use_c13) then
-                                   dwt_leafc13_seed(p) = leafc13_seed * dwt
-                                endif
+#if (defined C13)
+				dwt_leafc13_seed(p) = leafc13_seed * dwt
+#endif
 				dwt_leafn_seed(p)   = leafn_seed   * dwt
 				dwt_deadstemc_seed(p)   = deadstemc_seed   * dwt
-                                if (use_c13) then
-                                   dwt_deadstemc13_seed(p) = deadstemc13_seed * dwt
-                                endif
+#if (defined C13)
+				dwt_deadstemc13_seed(p) = deadstemc13_seed * dwt
+#endif
 				dwt_deadstemn_seed(p)   = deadstemn_seed   * dwt
 
 			else if (dwt < 0._r8) then
@@ -1344,7 +1355,7 @@ contains
 				!---------------
 
 				! leafc 
-				ptr => pcs%leafc(p)
+				ptr => pptr%pcs%leafc(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -1357,7 +1368,7 @@ contains
 				end if
 
 				! leafc_storage 
-				ptr => pcs%leafc_storage(p)
+				ptr => pptr%pcs%leafc_storage(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -1370,7 +1381,7 @@ contains
 				end if
 
 				! leafc_xfer 
-				ptr => pcs%leafc_xfer(p)
+				ptr => pptr%pcs%leafc_xfer(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -1383,7 +1394,7 @@ contains
 				end if
 
 				! frootc 
-				ptr => pcs%frootc(p)
+				ptr => pptr%pcs%frootc(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -1396,7 +1407,7 @@ contains
 				end if
 
 				! frootc_storage 
-				ptr => pcs%frootc_storage(p)
+				ptr => pptr%pcs%frootc_storage(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -1409,7 +1420,7 @@ contains
 				end if
 
 				! frootc_xfer 
-				ptr => pcs%frootc_xfer(p)
+				ptr => pptr%pcs%frootc_xfer(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -1422,7 +1433,7 @@ contains
 				end if
 
 				! livestemc 
-				ptr => pcs%livestemc(p)
+				ptr => pptr%pcs%livestemc(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -1435,7 +1446,7 @@ contains
 				end if
 
 				! livestemc_storage 
-				ptr => pcs%livestemc_storage(p)
+				ptr => pptr%pcs%livestemc_storage(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -1448,7 +1459,7 @@ contains
 				end if
 
 				! livestemc_xfer 
-				ptr => pcs%livestemc_xfer(p)
+				ptr => pptr%pcs%livestemc_xfer(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -1461,7 +1472,7 @@ contains
 				end if
 
 				! deadstemc 
-				ptr => pcs%deadstemc(p)
+				ptr => pptr%pcs%deadstemc(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -1478,7 +1489,7 @@ contains
 				end if
 
 				! deadstemc_storage 
-				ptr => pcs%deadstemc_storage(p)
+				ptr => pptr%pcs%deadstemc_storage(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -1491,7 +1502,7 @@ contains
 				end if
 
 				! deadstemc_xfer 
-				ptr => pcs%deadstemc_xfer(p)
+				ptr => pptr%pcs%deadstemc_xfer(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -1504,7 +1515,7 @@ contains
 				end if
 
 				! livecrootc 
-				ptr => pcs%livecrootc(p)
+				ptr => pptr%pcs%livecrootc(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -1517,7 +1528,7 @@ contains
 				end if
 
 				! livecrootc_storage 
-				ptr => pcs%livecrootc_storage(p)
+				ptr => pptr%pcs%livecrootc_storage(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -1530,7 +1541,7 @@ contains
 				end if
 
 				! livecrootc_xfer 
-				ptr => pcs%livecrootc_xfer(p)
+				ptr => pptr%pcs%livecrootc_xfer(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -1543,7 +1554,7 @@ contains
 				end if
 
 				! deadcrootc 
-				ptr => pcs%deadcrootc(p)
+				ptr => pptr%pcs%deadcrootc(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -1556,7 +1567,7 @@ contains
 				end if
 
 				! deadcrootc_storage 
-				ptr => pcs%deadcrootc_storage(p)
+				ptr => pptr%pcs%deadcrootc_storage(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -1569,7 +1580,7 @@ contains
 				end if
 
 				! deadcrootc_xfer 
-				ptr => pcs%deadcrootc_xfer(p)
+				ptr => pptr%pcs%deadcrootc_xfer(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -1582,7 +1593,7 @@ contains
 				end if
 
 				! gresp_storage 
-				ptr => pcs%gresp_storage(p)
+				ptr => pptr%pcs%gresp_storage(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -1595,7 +1606,7 @@ contains
 				end if
 
 				! gresp_xfer 
-				ptr => pcs%gresp_xfer(p)
+				ptr => pptr%pcs%gresp_xfer(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -1608,7 +1619,7 @@ contains
 				end if
 
 				! cpool 
-				ptr => pcs%cpool(p)
+				ptr => pptr%pcs%cpool(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -1621,7 +1632,7 @@ contains
 				end if
 
 				! xsmrpool 
-				ptr => pcs%xsmrpool(p)
+				ptr => pptr%pcs%xsmrpool(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -1634,7 +1645,7 @@ contains
 				end if
 
 				! pft_ctrunc 
-				ptr => pcs%pft_ctrunc(p)
+				ptr => pptr%pcs%pft_ctrunc(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -1646,310 +1657,310 @@ contains
 					conv_cflux(p) = conv_cflux(p) - init_state
 				end if
 
-                                if (use_c13) then
-                                   !-----------------
-                                   ! C13 state update
-                                   !-----------------
-                                   
-                                   ! set pointers to the conversion and product pool fluxes for this pft
-                                   ! dwt_ptr0 is reserved for local assignment to dwt_xxx_to_litter fluxes
-                                   dwt_ptr1 => conv_c13flux(p)
-                                   dwt_ptr2 => prod10_c13flux(p)
-                                   dwt_ptr3 => prod100_c13flux(p)
-                                   
-                                   ! leafc 
-                                   ptr => pc13s%leafc(p)
-                                   init_state = ptr*wt_old
-                                   change_state = ptr*dwt
-                                   new_state = init_state+change_state
-                                   if (wt_new /= 0._r8) then
-                                      ptr = new_state/wt_new
-                                      dwt_ptr1 = dwt_ptr1 + change_state
-                                   else
-                                      ptr = 0._r8
-                                      dwt_ptr1 = dwt_ptr1 - init_state
-                                   end if
-                                   
-                                   ! leafc_storage 
-                                   ptr => pc13s%leafc_storage(p)
-                                   init_state = ptr*wt_old
-                                   change_state = ptr*dwt
-                                   new_state = init_state+change_state
-                                   if (wt_new /= 0._r8) then
-                                      ptr = new_state/wt_new
-                                      dwt_ptr1 = dwt_ptr1 + change_state
-                                   else
-                                      ptr = 0._r8
-                                      dwt_ptr1 = dwt_ptr1 - init_state
-                                   end if
-                                   
-                                   ! leafc_xfer 
-                                   ptr => pc13s%leafc_xfer(p)
-                                   init_state = ptr*wt_old
-                                   change_state = ptr*dwt
-                                   new_state = init_state+change_state
-                                   if (wt_new /= 0._r8) then
-                                      ptr = new_state/wt_new
-                                      dwt_ptr1 = dwt_ptr1 + change_state
-                                   else
-                                      ptr = 0._r8
-                                      dwt_ptr1 = dwt_ptr1 - init_state
-                                   end if
-                                   
-                                   ! frootc 
-                                   ptr => pc13s%frootc(p)
-                                   dwt_ptr0 => dwt_frootc13_to_litter(p)
-                                   init_state = ptr*wt_old
-                                   change_state = ptr*dwt
-                                   new_state = init_state+change_state
-                                   if (wt_new /= 0._r8) then
-                                      ptr = new_state/wt_new
-                                      dwt_ptr0 = dwt_ptr0 - change_state
-                                   else
-                                      ptr = 0._r8
-                                      dwt_ptr0 = dwt_ptr0 + init_state
-                                   end if
-                                   
-                                   ! frootc_storage 
-                                   ptr => pc13s%frootc_storage(p)
-                                   init_state = ptr*wt_old
-                                   change_state = ptr*dwt
-                                   new_state = init_state+change_state
-                                   if (wt_new /= 0._r8) then
-                                      ptr = new_state/wt_new
-                                      dwt_ptr1 = dwt_ptr1 + change_state
-                                   else
-                                      ptr = 0._r8
-                                      dwt_ptr1 = dwt_ptr1 - init_state
-                                   end if
+#if (defined C13)
+				!-----------------
+				! C13 state update
+				!-----------------
 
-                                   ! frootc_xfer 
-                                   ptr => pc13s%frootc_xfer(p)
-                                   init_state = ptr*wt_old
-                                   change_state = ptr*dwt
-                                   new_state = init_state+change_state
-                                   if (wt_new /= 0._r8) then
-                                      ptr = new_state/wt_new
-                                      dwt_ptr1 = dwt_ptr1 + change_state
-                                   else
-                                      ptr = 0._r8
-                                      dwt_ptr1 = dwt_ptr1 - init_state
-                                   end if
-                                   
-                                   ! livestemc 
-                                   ptr => pc13s%livestemc(p)
-                                   init_state = ptr*wt_old
-                                   change_state = ptr*dwt
-                                   new_state = init_state+change_state
-                                   if (wt_new /= 0._r8) then
-                                      ptr = new_state/wt_new
-                                      dwt_ptr1 = dwt_ptr1 + change_state
-                                   else
-                                      ptr = 0._r8
-                                      dwt_ptr1 = dwt_ptr1 - init_state
-                                   end if
-                                   
-                                   ! livestemc_storage 
-                                   ptr => pc13s%livestemc_storage(p)
-                                   init_state = ptr*wt_old
-                                   change_state = ptr*dwt
-                                   new_state = init_state+change_state
-                                   if (wt_new /= 0._r8) then
-                                      ptr = new_state/wt_new
-                                      dwt_ptr1 = dwt_ptr1 + change_state
-                                   else
-                                      ptr = 0._r8
-                                      dwt_ptr1 = dwt_ptr1 - init_state
-                                   end if
-                                   
-                                   ! livestemc_xfer 
-                                   ptr => pc13s%livestemc_xfer(p)
-                                   init_state = ptr*wt_old
-                                   change_state = ptr*dwt
-                                   new_state = init_state+change_state
-                                   if (wt_new /= 0._r8) then
-                                      ptr = new_state/wt_new
-                                      dwt_ptr1 = dwt_ptr1 + change_state
-                                   else
-                                      ptr = 0._r8
-                                      dwt_ptr1 = dwt_ptr1 - init_state
-                                   end if
+				! set pointers to the conversion and product pool fluxes for this pft
+				! dwt_ptr0 is reserved for local assignment to dwt_xxx_to_litter fluxes
+				dwt_ptr1 => conv_c13flux(p)
+				dwt_ptr2 => prod10_c13flux(p)
+				dwt_ptr3 => prod100_c13flux(p)
 
-                                   ! deadstemc 
-                                   ptr => pc13s%deadstemc(p)
-                                   init_state = ptr*wt_old
-                                   change_state = ptr*dwt
-                                   new_state = init_state+change_state
-                                   if (wt_new /= 0._r8) then
-                                      ptr = new_state/wt_new
-                                      dwt_ptr1 = dwt_ptr1 + change_state*pconv(pptr%itype(p))
-                                      dwt_ptr2 = dwt_ptr2 + change_state*pprod10(pptr%itype(p))
-                                      dwt_ptr3 = dwt_ptr3 + change_state*pprod100(pptr%itype(p))
-                                   else
-                                      ptr = 0._r8
-                                      dwt_ptr1 = dwt_ptr1 - init_state*pconv(pptr%itype(p))
-                                      dwt_ptr2 = dwt_ptr2 - init_state*pprod10(pptr%itype(p))
-                                      dwt_ptr3 = dwt_ptr3 - init_state*pprod100(pptr%itype(p))
-                                   end if
-                                   
-                                   ! deadstemc_storage 
-                                   ptr => pc13s%deadstemc_storage(p)
-                                   init_state = ptr*wt_old
-                                   change_state = ptr*dwt
-                                   new_state = init_state+change_state
-                                   if (wt_new /= 0._r8) then
-                                      ptr = new_state/wt_new
-                                      dwt_ptr1 = dwt_ptr1 + change_state
-                                   else
-                                      ptr = 0._r8
-                                      dwt_ptr1 = dwt_ptr1 - init_state
-                                   end if
-                                   
-                                   ! deadstemc_xfer 
-                                   ptr => pc13s%deadstemc_xfer(p)
-                                   init_state = ptr*wt_old
-                                   change_state = ptr*dwt
-                                   new_state = init_state+change_state
-                                   if (wt_new /= 0._r8) then
-                                      ptr = new_state/wt_new
-                                      dwt_ptr1 = dwt_ptr1 + change_state
-                                   else
-                                      ptr = 0._r8
-                                      dwt_ptr1 = dwt_ptr1 - init_state
-                                   end if
-                                   
-                                   ! livecrootc 
-                                   ptr => pc13s%livecrootc(p)
-                                   dwt_ptr0 => dwt_livecrootc13_to_litter(p)
-                                   init_state = ptr*wt_old
-                                   change_state = ptr*dwt
-                                   new_state = init_state+change_state
-                                   if (wt_new /= 0._r8) then
-                                      ptr = new_state/wt_new
-                                      dwt_ptr0 = dwt_ptr0 - change_state
-                                   else
-                                      ptr = 0._r8
-                                      dwt_ptr0 = dwt_ptr0 + init_state
-                                   end if
-                                   
-                                   ! livecrootc_storage 
-                                   ptr => pc13s%livecrootc_storage(p)
-                                   init_state = ptr*wt_old
-                                   change_state = ptr*dwt
-                                   new_state = init_state+change_state
-                                   if (wt_new /= 0._r8) then
-                                      ptr = new_state/wt_new
-                                      dwt_ptr1 = dwt_ptr1 + change_state
-                                   else
-                                      ptr = 0._r8
-                                      dwt_ptr1 = dwt_ptr1 - init_state
-                                   end if
-                                   
-                                   ! livecrootc_xfer 
-                                   ptr => pc13s%livecrootc_xfer(p)
-                                   init_state = ptr*wt_old
-                                   change_state = ptr*dwt
-                                   new_state = init_state+change_state
-                                   if (wt_new /= 0._r8) then
-                                      ptr = new_state/wt_new
-                                      dwt_ptr1 = dwt_ptr1 + change_state
-                                   else
-                                      ptr = 0._r8
-                                      dwt_ptr1 = dwt_ptr1 - init_state
-                                   end if
-                                   
-                                   ! deadcrootc 
-                                   ptr => pc13s%deadcrootc(p)
-                                   dwt_ptr0 => dwt_deadcrootc13_to_litter(p)
-                                   init_state = ptr*wt_old
-                                   change_state = ptr*dwt
-                                   new_state = init_state+change_state
-                                   if (wt_new /= 0._r8) then
-                                      ptr = new_state/wt_new
-                                      dwt_ptr0 = dwt_ptr0 - change_state
-                                   else
-                                      ptr = 0._r8
-                                      dwt_ptr0 = dwt_ptr0 + init_state
-                                   end if
-                                   
-                                   ! deadcrootc_storage 
-                                   ptr => pc13s%deadcrootc_storage(p)
-                                   init_state = ptr*wt_old
-                                   change_state = ptr*dwt
-                                   new_state = init_state+change_state
-                                   if (wt_new /= 0._r8) then
-                                      ptr = new_state/wt_new
-                                      dwt_ptr1 = dwt_ptr1 + change_state
-                                   else
-                                      ptr = 0._r8
-                                      dwt_ptr1 = dwt_ptr1 - init_state
-                                   end if
-                                   
-                                   ! deadcrootc_xfer 
-                                   ptr => pc13s%deadcrootc_xfer(p)
-                                   init_state = ptr*wt_old
-                                   change_state = ptr*dwt
-                                   new_state = init_state+change_state
-                                   if (wt_new /= 0._r8) then
-                                      ptr = new_state/wt_new
-                                      dwt_ptr1 = dwt_ptr1 + change_state
-                                   else
-                                      ptr = 0._r8
-                                      dwt_ptr1 = dwt_ptr1 - init_state
-                                   end if
+				! leafc 
+				ptr => pptr%pc13s%leafc(p)
+				init_state = ptr*wt_old
+				change_state = ptr*dwt
+				new_state = init_state+change_state
+				if (wt_new /= 0._r8) then
+					ptr = new_state/wt_new
+					dwt_ptr1 = dwt_ptr1 + change_state
+				else
+					ptr = 0._r8
+					dwt_ptr1 = dwt_ptr1 - init_state
+				end if
 
-                                   ! gresp_storage 
-                                   ptr => pc13s%gresp_storage(p)
-                                   init_state = ptr*wt_old
-                                   change_state = ptr*dwt
-                                   new_state = init_state+change_state
-                                   if (wt_new /= 0._r8) then
-                                      ptr = new_state/wt_new
-                                      dwt_ptr1 = dwt_ptr1 + change_state
-                                   else
-                                      ptr = 0._r8
-                                      dwt_ptr1 = dwt_ptr1 - init_state
-                                   end if
+				! leafc_storage 
+				ptr => pptr%pc13s%leafc_storage(p)
+				init_state = ptr*wt_old
+				change_state = ptr*dwt
+				new_state = init_state+change_state
+				if (wt_new /= 0._r8) then
+					ptr = new_state/wt_new
+					dwt_ptr1 = dwt_ptr1 + change_state
+				else
+					ptr = 0._r8
+					dwt_ptr1 = dwt_ptr1 - init_state
+				end if
 
-                                   ! gresp_xfer 
-                                   ptr => pc13s%gresp_xfer(p)
-                                   init_state = ptr*wt_old
-                                   change_state = ptr*dwt
-                                   new_state = init_state+change_state
-                                   if (wt_new /= 0._r8) then
-                                      ptr = new_state/wt_new
-                                      dwt_ptr1 = dwt_ptr1 + change_state
-                                   else
-                                      ptr = 0._r8
-                                      dwt_ptr1 = dwt_ptr1 - init_state
-                                   end if
+				! leafc_xfer 
+				ptr => pptr%pc13s%leafc_xfer(p)
+				init_state = ptr*wt_old
+				change_state = ptr*dwt
+				new_state = init_state+change_state
+				if (wt_new /= 0._r8) then
+					ptr = new_state/wt_new
+					dwt_ptr1 = dwt_ptr1 + change_state
+				else
+					ptr = 0._r8
+					dwt_ptr1 = dwt_ptr1 - init_state
+				end if
 
-                                   ! cpool 
-                                   ptr => pc13s%cpool(p)
-                                   init_state = ptr*wt_old
-                                   change_state = ptr*dwt
-                                   new_state = init_state+change_state
-                                   if (wt_new /= 0._r8) then
-                                      ptr = new_state/wt_new
-                                      dwt_ptr1 = dwt_ptr1 + change_state
-                                   else
-                                      ptr = 0._r8
-                                      dwt_ptr1 = dwt_ptr1 - init_state
-                                   end if
+				! frootc 
+				ptr => pptr%pc13s%frootc(p)
+				dwt_ptr0 => dwt_frootc13_to_litter(p)
+				init_state = ptr*wt_old
+				change_state = ptr*dwt
+				new_state = init_state+change_state
+				if (wt_new /= 0._r8) then
+					ptr = new_state/wt_new
+					dwt_ptr0 = dwt_ptr0 - change_state
+				else
+					ptr = 0._r8
+					dwt_ptr0 = dwt_ptr0 + init_state
+				end if
 
-                                   ! pft_ctrunc 
-                                   ptr => pc13s%pft_ctrunc(p)
-                                   init_state = ptr*wt_old
-                                   change_state = ptr*dwt
-                                   new_state = init_state+change_state
-                                   if (wt_new /= 0._r8) then
-                                      ptr = new_state/wt_new
-                                      dwt_ptr1 = dwt_ptr1 + change_state
-                                   else
-                                      ptr = 0._r8
-                                      dwt_ptr1 = dwt_ptr1 - init_state
-                                   end if
-                                endif
+				! frootc_storage 
+				ptr => pptr%pc13s%frootc_storage(p)
+				init_state = ptr*wt_old
+				change_state = ptr*dwt
+				new_state = init_state+change_state
+				if (wt_new /= 0._r8) then
+					ptr = new_state/wt_new
+					dwt_ptr1 = dwt_ptr1 + change_state
+				else
+					ptr = 0._r8
+					dwt_ptr1 = dwt_ptr1 - init_state
+				end if
+
+				! frootc_xfer 
+				ptr => pptr%pc13s%frootc_xfer(p)
+				init_state = ptr*wt_old
+				change_state = ptr*dwt
+				new_state = init_state+change_state
+				if (wt_new /= 0._r8) then
+					ptr = new_state/wt_new
+					dwt_ptr1 = dwt_ptr1 + change_state
+				else
+					ptr = 0._r8
+					dwt_ptr1 = dwt_ptr1 - init_state
+				end if
+
+				! livestemc 
+				ptr => pptr%pc13s%livestemc(p)
+				init_state = ptr*wt_old
+				change_state = ptr*dwt
+				new_state = init_state+change_state
+				if (wt_new /= 0._r8) then
+					ptr = new_state/wt_new
+					dwt_ptr1 = dwt_ptr1 + change_state
+				else
+					ptr = 0._r8
+					dwt_ptr1 = dwt_ptr1 - init_state
+				end if
+
+				! livestemc_storage 
+				ptr => pptr%pc13s%livestemc_storage(p)
+				init_state = ptr*wt_old
+				change_state = ptr*dwt
+				new_state = init_state+change_state
+				if (wt_new /= 0._r8) then
+					ptr = new_state/wt_new
+					dwt_ptr1 = dwt_ptr1 + change_state
+				else
+					ptr = 0._r8
+					dwt_ptr1 = dwt_ptr1 - init_state
+				end if
+
+				! livestemc_xfer 
+				ptr => pptr%pc13s%livestemc_xfer(p)
+				init_state = ptr*wt_old
+				change_state = ptr*dwt
+				new_state = init_state+change_state
+				if (wt_new /= 0._r8) then
+					ptr = new_state/wt_new
+					dwt_ptr1 = dwt_ptr1 + change_state
+				else
+					ptr = 0._r8
+					dwt_ptr1 = dwt_ptr1 - init_state
+				end if
+
+				! deadstemc 
+				ptr => pptr%pc13s%deadstemc(p)
+				init_state = ptr*wt_old
+				change_state = ptr*dwt
+				new_state = init_state+change_state
+				if (wt_new /= 0._r8) then
+					ptr = new_state/wt_new
+					dwt_ptr1 = dwt_ptr1 + change_state*pconv(pptr%itype(p))
+					dwt_ptr2 = dwt_ptr2 + change_state*pprod10(pptr%itype(p))
+					dwt_ptr3 = dwt_ptr3 + change_state*pprod100(pptr%itype(p))
+				else
+					ptr = 0._r8
+					dwt_ptr1 = dwt_ptr1 - init_state*pconv(pptr%itype(p))
+					dwt_ptr2 = dwt_ptr2 - init_state*pprod10(pptr%itype(p))
+					dwt_ptr3 = dwt_ptr3 - init_state*pprod100(pptr%itype(p))
+				end if
+
+				! deadstemc_storage 
+				ptr => pptr%pc13s%deadstemc_storage(p)
+				init_state = ptr*wt_old
+				change_state = ptr*dwt
+				new_state = init_state+change_state
+				if (wt_new /= 0._r8) then
+					ptr = new_state/wt_new
+					dwt_ptr1 = dwt_ptr1 + change_state
+				else
+					ptr = 0._r8
+					dwt_ptr1 = dwt_ptr1 - init_state
+				end if
+
+				! deadstemc_xfer 
+				ptr => pptr%pc13s%deadstemc_xfer(p)
+				init_state = ptr*wt_old
+				change_state = ptr*dwt
+				new_state = init_state+change_state
+				if (wt_new /= 0._r8) then
+					ptr = new_state/wt_new
+					dwt_ptr1 = dwt_ptr1 + change_state
+				else
+					ptr = 0._r8
+					dwt_ptr1 = dwt_ptr1 - init_state
+				end if
+
+				! livecrootc 
+				ptr => pptr%pc13s%livecrootc(p)
+				dwt_ptr0 => dwt_livecrootc13_to_litter(p)
+				init_state = ptr*wt_old
+				change_state = ptr*dwt
+				new_state = init_state+change_state
+				if (wt_new /= 0._r8) then
+					ptr = new_state/wt_new
+					dwt_ptr0 = dwt_ptr0 - change_state
+				else
+					ptr = 0._r8
+					dwt_ptr0 = dwt_ptr0 + init_state
+				end if
+
+				! livecrootc_storage 
+				ptr => pptr%pc13s%livecrootc_storage(p)
+				init_state = ptr*wt_old
+				change_state = ptr*dwt
+				new_state = init_state+change_state
+				if (wt_new /= 0._r8) then
+					ptr = new_state/wt_new
+					dwt_ptr1 = dwt_ptr1 + change_state
+				else
+					ptr = 0._r8
+					dwt_ptr1 = dwt_ptr1 - init_state
+				end if
+
+				! livecrootc_xfer 
+				ptr => pptr%pc13s%livecrootc_xfer(p)
+				init_state = ptr*wt_old
+				change_state = ptr*dwt
+				new_state = init_state+change_state
+				if (wt_new /= 0._r8) then
+					ptr = new_state/wt_new
+					dwt_ptr1 = dwt_ptr1 + change_state
+				else
+					ptr = 0._r8
+					dwt_ptr1 = dwt_ptr1 - init_state
+				end if
+
+				! deadcrootc 
+				ptr => pptr%pc13s%deadcrootc(p)
+				dwt_ptr0 => dwt_deadcrootc13_to_litter(p)
+				init_state = ptr*wt_old
+				change_state = ptr*dwt
+				new_state = init_state+change_state
+				if (wt_new /= 0._r8) then
+					ptr = new_state/wt_new
+					dwt_ptr0 = dwt_ptr0 - change_state
+				else
+					ptr = 0._r8
+					dwt_ptr0 = dwt_ptr0 + init_state
+				end if
+
+				! deadcrootc_storage 
+				ptr => pptr%pc13s%deadcrootc_storage(p)
+				init_state = ptr*wt_old
+				change_state = ptr*dwt
+				new_state = init_state+change_state
+				if (wt_new /= 0._r8) then
+					ptr = new_state/wt_new
+					dwt_ptr1 = dwt_ptr1 + change_state
+				else
+					ptr = 0._r8
+					dwt_ptr1 = dwt_ptr1 - init_state
+				end if
+
+				! deadcrootc_xfer 
+				ptr => pptr%pc13s%deadcrootc_xfer(p)
+				init_state = ptr*wt_old
+				change_state = ptr*dwt
+				new_state = init_state+change_state
+				if (wt_new /= 0._r8) then
+					ptr = new_state/wt_new
+					dwt_ptr1 = dwt_ptr1 + change_state
+				else
+					ptr = 0._r8
+					dwt_ptr1 = dwt_ptr1 - init_state
+				end if
+
+				! gresp_storage 
+				ptr => pptr%pc13s%gresp_storage(p)
+				init_state = ptr*wt_old
+				change_state = ptr*dwt
+				new_state = init_state+change_state
+				if (wt_new /= 0._r8) then
+					ptr = new_state/wt_new
+					dwt_ptr1 = dwt_ptr1 + change_state
+				else
+					ptr = 0._r8
+					dwt_ptr1 = dwt_ptr1 - init_state
+				end if
+
+				! gresp_xfer 
+				ptr => pptr%pc13s%gresp_xfer(p)
+				init_state = ptr*wt_old
+				change_state = ptr*dwt
+				new_state = init_state+change_state
+				if (wt_new /= 0._r8) then
+					ptr = new_state/wt_new
+					dwt_ptr1 = dwt_ptr1 + change_state
+				else
+					ptr = 0._r8
+					dwt_ptr1 = dwt_ptr1 - init_state
+				end if
+
+				! cpool 
+				ptr => pptr%pc13s%cpool(p)
+				init_state = ptr*wt_old
+				change_state = ptr*dwt
+				new_state = init_state+change_state
+				if (wt_new /= 0._r8) then
+					ptr = new_state/wt_new
+					dwt_ptr1 = dwt_ptr1 + change_state
+				else
+					ptr = 0._r8
+					dwt_ptr1 = dwt_ptr1 - init_state
+				end if
+
+				! pft_ctrunc 
+				ptr => pptr%pc13s%pft_ctrunc(p)
+				init_state = ptr*wt_old
+				change_state = ptr*dwt
+				new_state = init_state+change_state
+				if (wt_new /= 0._r8) then
+					ptr = new_state/wt_new
+					dwt_ptr1 = dwt_ptr1 + change_state
+				else
+					ptr = 0._r8
+					dwt_ptr1 = dwt_ptr1 - init_state
+				end if
+#endif
 
 				!---------------
 				! N state update
@@ -1962,7 +1973,7 @@ contains
 				dwt_ptr3 => prod100_nflux(p)
 
 				! leafn 
-				ptr => pns%leafn(p)
+				ptr => pptr%pns%leafn(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -1975,7 +1986,7 @@ contains
 				end if
 
 				! leafn_storage  
-				ptr => pns%leafn_storage(p)
+				ptr => pptr%pns%leafn_storage(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -1988,7 +1999,7 @@ contains
 				end if
 
 				! leafn_xfer  
-				ptr => pns%leafn_xfer(p)
+				ptr => pptr%pns%leafn_xfer(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -2001,7 +2012,7 @@ contains
 				end if
 
 				! frootn 
-				ptr => pns%frootn(p)
+				ptr => pptr%pns%frootn(p)
 				dwt_ptr0 => dwt_frootn_to_litter(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
@@ -2015,7 +2026,7 @@ contains
 				end if
 
 				! frootn_storage 
-				ptr => pns%frootn_storage(p)
+				ptr => pptr%pns%frootn_storage(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -2028,7 +2039,7 @@ contains
 				end if
 
 				! frootn_xfer  
-				ptr => pns%frootn_xfer(p)
+				ptr => pptr%pns%frootn_xfer(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -2041,7 +2052,7 @@ contains
 				end if
 
 				! livestemn  
-				ptr => pns%livestemn(p)
+				ptr => pptr%pns%livestemn(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -2054,7 +2065,7 @@ contains
 				end if
 
 				! livestemn_storage 
-				ptr => pns%livestemn_storage(p)
+				ptr => pptr%pns%livestemn_storage(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -2067,7 +2078,7 @@ contains
 				end if
 
 				! livestemn_xfer 
-				ptr => pns%livestemn_xfer(p)
+				ptr => pptr%pns%livestemn_xfer(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -2080,7 +2091,7 @@ contains
 				end if
 
 				! deadstemn 
-				ptr => pns%deadstemn(p)
+				ptr => pptr%pns%deadstemn(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -2097,7 +2108,7 @@ contains
 				end if
 
 				! deadstemn_storage 
-				ptr => pns%deadstemn_storage(p)
+				ptr => pptr%pns%deadstemn_storage(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -2110,7 +2121,7 @@ contains
 				end if
 
 				! deadstemn_xfer 
-				ptr => pns%deadstemn_xfer(p)
+				ptr => pptr%pns%deadstemn_xfer(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -2123,7 +2134,7 @@ contains
 				end if
 
 				! livecrootn 
-				ptr => pns%livecrootn(p)
+				ptr => pptr%pns%livecrootn(p)
 				dwt_ptr0 => dwt_livecrootn_to_litter(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
@@ -2137,7 +2148,7 @@ contains
 				end if
 
 				! livecrootn_storage  
-				ptr => pns%livecrootn_storage(p)
+				ptr => pptr%pns%livecrootn_storage(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -2150,7 +2161,7 @@ contains
 				end if
 
 				! livecrootn_xfer  
-				ptr => pns%livecrootn_xfer(p)
+				ptr => pptr%pns%livecrootn_xfer(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -2163,7 +2174,7 @@ contains
 				end if
 
 				! deadcrootn 
-				ptr => pns%deadcrootn(p)
+				ptr => pptr%pns%deadcrootn(p)
 				dwt_ptr0 => dwt_deadcrootn_to_litter(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
@@ -2177,7 +2188,7 @@ contains
 				end if
 
 				! deadcrootn_storage  
-				ptr => pns%deadcrootn_storage(p)
+				ptr => pptr%pns%deadcrootn_storage(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -2190,7 +2201,7 @@ contains
 				end if
 
 				! deadcrootn_xfer  
-				ptr => pns%deadcrootn_xfer(p)
+				ptr => pptr%pns%deadcrootn_xfer(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -2203,7 +2214,7 @@ contains
 				end if
 
 				! retransn  
-				ptr => pns%retransn(p)
+				ptr => pptr%pns%retransn(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -2216,7 +2227,7 @@ contains
 				end if
 
 				! npool  
-				ptr => pns%npool(p)
+				ptr => pptr%pns%npool(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -2229,7 +2240,7 @@ contains
 				end if
 				
 				! pft_ntrunc  
-				ptr => pns%pft_ntrunc(p)
+				ptr => pptr%pns%pft_ntrunc(p)
 				init_state = ptr*wt_old
 				change_state = ptr*dwt
 				new_state = init_state+change_state
@@ -2252,20 +2263,20 @@ contains
 				p = cptr%pfti(c) + pi - 1
 				
 				! C fluxes
-				ccf%dwt_seedc_to_leaf(c) = ccf%dwt_seedc_to_leaf(c) + dwt_leafc_seed(p)/dt
-				ccf%dwt_seedc_to_deadstem(c) = ccf%dwt_seedc_to_deadstem(c) &
+				cptr%ccf%dwt_seedc_to_leaf(c) = cptr%ccf%dwt_seedc_to_leaf(c) + dwt_leafc_seed(p)/dt
+				cptr%ccf%dwt_seedc_to_deadstem(c) = cptr%ccf%dwt_seedc_to_deadstem(c) &
                                                                     + dwt_deadstemc_seed(p)/dt
 				
-                                ! C13 fluxes
-                                if (use_c13) then
-                                   cc13f%dwt_seedc_to_leaf(c) = cc13f%dwt_seedc_to_leaf(c) + dwt_leafc13_seed(p)/dt
-                                   cc13f%dwt_seedc_to_deadstem(c) = cc13f%dwt_seedc_to_deadstem(c) &
-                                                                         + dwt_deadstemc13_seed(p)/dt
-                                endif
+#if (defined C13)
+				! C13 fluxes
+                                cptr%cc13f%dwt_seedc_to_leaf(c) = cptr%cc13f%dwt_seedc_to_leaf(c) + dwt_leafc13_seed(p)/dt
+                                cptr%cc13f%dwt_seedc_to_deadstem(c) = cptr%cc13f%dwt_seedc_to_deadstem(c) &
+                                                                      + dwt_deadstemc13_seed(p)/dt
+#endif
 				
 				! N fluxes
-				cnf%dwt_seedn_to_leaf(c) = cnf%dwt_seedn_to_leaf(c) + dwt_leafn_seed(p)/dt
-				cnf%dwt_seedn_to_deadstem(c) = cnf%dwt_seedn_to_deadstem(c) &
+				cptr%cnf%dwt_seedn_to_leaf(c) = cptr%cnf%dwt_seedn_to_leaf(c) + dwt_leafn_seed(p)/dt
+				cptr%cnf%dwt_seedn_to_deadstem(c) = cptr%cnf%dwt_seedn_to_deadstem(c) &
                                                                     + dwt_deadstemn_seed(p)/dt
 			end if
 		end do
@@ -2279,49 +2290,49 @@ contains
 				p = cptr%pfti(c) + pi - 1
 
 				! fine root litter carbon fluxes
-				ccf%dwt_frootc_to_litr1c(c) = ccf%dwt_frootc_to_litr1c(c) + &
+				cptr%ccf%dwt_frootc_to_litr1c(c) = cptr%ccf%dwt_frootc_to_litr1c(c) + &
                                                             (dwt_frootc_to_litter(p)*pftcon%fr_flab(pptr%itype(p)))/dt
-				ccf%dwt_frootc_to_litr2c(c) = ccf%dwt_frootc_to_litr2c(c) + &
+				cptr%ccf%dwt_frootc_to_litr2c(c) = cptr%ccf%dwt_frootc_to_litr2c(c) + &
                                                             (dwt_frootc_to_litter(p)*pftcon%fr_fcel(pptr%itype(p)))/dt
-				ccf%dwt_frootc_to_litr3c(c) = ccf%dwt_frootc_to_litr3c(c) + &
+				cptr%ccf%dwt_frootc_to_litr3c(c) = cptr%ccf%dwt_frootc_to_litr3c(c) + &
                                                             (dwt_frootc_to_litter(p)*pftcon%fr_flig(pptr%itype(p)))/dt
 
+#if (defined C13)
 				! fine root litter C13 fluxes
-                                if (use_c13) then
-                                   cc13f%dwt_frootc_to_litr1c(c) = cc13f%dwt_frootc_to_litr1c(c) + &
-                                                               (dwt_frootc13_to_litter(p)*pftcon%fr_flab(pptr%itype(p)))/dt
-                                   cc13f%dwt_frootc_to_litr2c(c) = cc13f%dwt_frootc_to_litr2c(c) + &
-                                                               (dwt_frootc13_to_litter(p)*pftcon%fr_fcel(pptr%itype(p)))/dt
-                                   cc13f%dwt_frootc_to_litr3c(c) = cc13f%dwt_frootc_to_litr3c(c) + &
-                                                               (dwt_frootc13_to_litter(p)*pftcon%fr_flig(pptr%itype(p)))/dt
-                                endif
+				cptr%cc13f%dwt_frootc_to_litr1c(c) = cptr%cc13f%dwt_frootc_to_litr1c(c) + &
+                                                            (dwt_frootc13_to_litter(p)*pftcon%fr_flab(pptr%itype(p)))/dt
+				cptr%cc13f%dwt_frootc_to_litr2c(c) = cptr%cc13f%dwt_frootc_to_litr2c(c) + &
+                                                            (dwt_frootc13_to_litter(p)*pftcon%fr_fcel(pptr%itype(p)))/dt
+				cptr%cc13f%dwt_frootc_to_litr3c(c) = cptr%cc13f%dwt_frootc_to_litr3c(c) + &
+                                                            (dwt_frootc13_to_litter(p)*pftcon%fr_flig(pptr%itype(p)))/dt
+#endif
 
 				! fine root litter nitrogen fluxes
-				cnf%dwt_frootn_to_litr1n(c) = cnf%dwt_frootn_to_litr1n(c) + &
+				cptr%cnf%dwt_frootn_to_litr1n(c) = cptr%cnf%dwt_frootn_to_litr1n(c) + &
                                                             (dwt_frootn_to_litter(p)*pftcon%fr_flab(pptr%itype(p)))/dt
-				cnf%dwt_frootn_to_litr2n(c) = cnf%dwt_frootn_to_litr2n(c) + &
+				cptr%cnf%dwt_frootn_to_litr2n(c) = cptr%cnf%dwt_frootn_to_litr2n(c) + &
                                                             (dwt_frootn_to_litter(p)*pftcon%fr_fcel(pptr%itype(p)))/dt
-				cnf%dwt_frootn_to_litr3n(c) = cnf%dwt_frootn_to_litr3n(c) + &
+				cptr%cnf%dwt_frootn_to_litr3n(c) = cptr%cnf%dwt_frootn_to_litr3n(c) + &
                                                             (dwt_frootn_to_litter(p)*pftcon%fr_flig(pptr%itype(p)))/dt
 
 				! livecroot fluxes to cwd
-				ccf%dwt_livecrootc_to_cwdc(c) = ccf%dwt_livecrootc_to_cwdc(c) + &
+				cptr%ccf%dwt_livecrootc_to_cwdc(c) = cptr%ccf%dwt_livecrootc_to_cwdc(c) + &
                                                             (dwt_livecrootc_to_litter(p))/dt
-                                if (use_c13) then
-                                   cc13f%dwt_livecrootc_to_cwdc(c) = cc13f%dwt_livecrootc_to_cwdc(c) + &
-                                                               (dwt_livecrootc13_to_litter(p))/dt
-                                endif
-				cnf%dwt_livecrootn_to_cwdn(c) = cnf%dwt_livecrootn_to_cwdn(c) + &
+#if (defined C13)
+				cptr%cc13f%dwt_livecrootc_to_cwdc(c) = cptr%cc13f%dwt_livecrootc_to_cwdc(c) + &
+                                                            (dwt_livecrootc13_to_litter(p))/dt
+#endif
+				cptr%cnf%dwt_livecrootn_to_cwdn(c) = cptr%cnf%dwt_livecrootn_to_cwdn(c) + &
                                                             (dwt_livecrootn_to_litter(p))/dt
 
 				! deadcroot fluxes to cwd
-				ccf%dwt_deadcrootc_to_cwdc(c) = ccf%dwt_deadcrootc_to_cwdc(c) + &
+				cptr%ccf%dwt_deadcrootc_to_cwdc(c) = cptr%ccf%dwt_deadcrootc_to_cwdc(c) + &
                                                             (dwt_deadcrootc_to_litter(p))/dt
-                                if (use_c13) then
-                                   cc13f%dwt_deadcrootc_to_cwdc(c) = cc13f%dwt_deadcrootc_to_cwdc(c) + &
-                                                               (dwt_deadcrootc13_to_litter(p))/dt
-                                endif
-				cnf%dwt_deadcrootn_to_cwdn(c) = cnf%dwt_deadcrootn_to_cwdn(c) + &
+#if (defined C13)
+				cptr%cc13f%dwt_deadcrootc_to_cwdc(c) = cptr%cc13f%dwt_deadcrootc_to_cwdc(c) + &
+                                                            (dwt_deadcrootc13_to_litter(p))/dt
+#endif
+				cptr%cnf%dwt_deadcrootn_to_cwdn(c) = cptr%cnf%dwt_deadcrootn_to_cwdn(c) + &
                                                             (dwt_deadcrootn_to_litter(p))/dt
 			end if
 		end do
@@ -2335,21 +2346,21 @@ contains
 
 				! column-level fluxes are accumulated as positive fluxes.
 				! column-level C flux updates
-				ccf%dwt_conv_cflux(c) = ccf%dwt_conv_cflux(c) - conv_cflux(p)/dt
-				ccf%dwt_prod10c_gain(c) = ccf%dwt_prod10c_gain(c) - prod10_cflux(p)/dt
-				ccf%dwt_prod100c_gain(c) = ccf%dwt_prod100c_gain(c) - prod100_cflux(p)/dt
+				cptr%ccf%dwt_conv_cflux(c) = cptr%ccf%dwt_conv_cflux(c) - conv_cflux(p)/dt
+				cptr%ccf%dwt_prod10c_gain(c) = cptr%ccf%dwt_prod10c_gain(c) - prod10_cflux(p)/dt
+				cptr%ccf%dwt_prod100c_gain(c) = cptr%ccf%dwt_prod100c_gain(c) - prod100_cflux(p)/dt
 
+#if (defined C13)
 				! column-level C13 flux updates
-                                if (use_c13) then
-                                   cc13f%dwt_conv_cflux(c) = cc13f%dwt_conv_cflux(c) - conv_c13flux(p)/dt
-                                   cc13f%dwt_prod10c_gain(c) = cc13f%dwt_prod10c_gain(c) - prod10_c13flux(p)/dt
-                                   cc13f%dwt_prod100c_gain(c) = cc13f%dwt_prod100c_gain(c) - prod100_c13flux(p)/dt
-                                endif
+				cptr%cc13f%dwt_conv_cflux(c) = cptr%cc13f%dwt_conv_cflux(c) - conv_c13flux(p)/dt
+				cptr%cc13f%dwt_prod10c_gain(c) = cptr%cc13f%dwt_prod10c_gain(c) - prod10_c13flux(p)/dt
+				cptr%cc13f%dwt_prod100c_gain(c) = cptr%cc13f%dwt_prod100c_gain(c) - prod100_c13flux(p)/dt
+#endif
 
 				! column-level N flux updates
-				cnf%dwt_conv_nflux(c) = cnf%dwt_conv_nflux(c) - conv_nflux(p)/dt
-				cnf%dwt_prod10n_gain(c) = cnf%dwt_prod10n_gain(c) - prod10_nflux(p)/dt
-				cnf%dwt_prod100n_gain(c) = cnf%dwt_prod100n_gain(c) - prod100_nflux(p)/dt
+				cptr%cnf%dwt_conv_nflux(c) = cptr%cnf%dwt_conv_nflux(c) - conv_nflux(p)/dt
+				cptr%cnf%dwt_prod10n_gain(c) = cptr%cnf%dwt_prod10n_gain(c) - prod10_nflux(p)/dt
+				cptr%cnf%dwt_prod100n_gain(c) = cptr%cnf%dwt_prod100n_gain(c) - prod100_nflux(p)/dt
 
 			end if
 		end do
@@ -2358,39 +2369,41 @@ contains
 	! Deallocate pft-level flux arrays
         deallocate(dwt_leafc_seed)
         deallocate(dwt_leafn_seed)
-        if (use_c13) then
-           deallocate(dwt_leafc13_seed)
-        endif
+#if (defined C13)
+        deallocate(dwt_leafc13_seed)
+#endif
         deallocate(dwt_deadstemc_seed)
         deallocate(dwt_deadstemn_seed)
-        if (use_c13) then
-           deallocate(dwt_deadstemc13_seed)
-        endif
+#if (defined C13)
+        deallocate(dwt_deadstemc13_seed)
+#endif
 	deallocate(dwt_frootc_to_litter)
 	deallocate(dwt_livecrootc_to_litter)
 	deallocate(dwt_deadcrootc_to_litter)
-        if (use_c13) then
-           deallocate(dwt_frootc13_to_litter)
-           deallocate(dwt_livecrootc13_to_litter)
-           deallocate(dwt_deadcrootc13_to_litter)
-        endif
+#if (defined C13)
+	deallocate(dwt_frootc13_to_litter)
+	deallocate(dwt_livecrootc13_to_litter)
+	deallocate(dwt_deadcrootc13_to_litter)
+#endif
 	deallocate(dwt_frootn_to_litter)
 	deallocate(dwt_livecrootn_to_litter)
 	deallocate(dwt_deadcrootn_to_litter)
 	deallocate(conv_cflux)
 	deallocate(prod10_cflux)
 	deallocate(prod100_cflux)
-        if (use_c13) then
-           deallocate(conv_c13flux)
-           deallocate(prod10_c13flux)
-           deallocate(prod100_c13flux)
-        endif
+#if (defined C13)
+	deallocate(conv_c13flux)
+	deallocate(prod10_c13flux)
+	deallocate(prod100_c13flux)
+#endif
 	deallocate(conv_nflux)
 	deallocate(prod10_nflux)
 	deallocate(prod100_nflux)
     
 end subroutine pftdyn_cnbal
+#endif
 
+#if (defined CNDV)
 !-----------------------------------------------------------------------
 !BOP
 !
@@ -2417,24 +2430,20 @@ end subroutine pftdyn_cnbal
     type(pft_type), pointer :: pptr           ! ponter to pft derived subtype
 !-----------------------------------------------------------------------
 
-    pptr => pft
+    pptr => clm3%g%l%c%p
 
     call get_proc_bounds(begp=begp,endp=endp)
 
     allocate(wtcol_old(begp:endp),stat=ier)
     if (ier /= 0) then
-       call endrun( subname//'::ERROR: pftwt_init allocation error for wtcol_old')
+       write(6,*)'pftwt_init allocation error for wtcol_old'
+       call endrun()
     end if
 
     if (nsrest == nsrStartup) then
        do p = begp,endp
-          pdgvs%fpcgrid(p) = pptr%wtcol(p)
-          pdgvs%fpcgridold(p) = pptr%wtcol(p)
-          wtcol_old(p) = pptr%wtcol(p)
-       end do
-     else
-       do p = begp,endp
-          wtcol_old(p) = pptr%wtcol(p)
+          pptr%pdgvs%fpcgrid(p) = pptr%wtcol(p)
+          pptr%pdgvs%fpcgridold(p) = pptr%wtcol(p)
        end do
     end if
 
@@ -2485,8 +2494,8 @@ end subroutine pftdyn_cnbal
 
     ! Set pointers into derived type
 
-    lptr => lun
-    pptr => pft
+    lptr => clm3%g%l
+    pptr => clm3%g%l%c%p
 
     ! Interpolate pft weight to current time step
     ! Map interpolated pctpft to subgrid weights
@@ -2508,19 +2517,21 @@ end subroutine pftdyn_cnbal
 
        if (lptr%itype(l) == istsoil .and. lptr%wtgcell(l) > 0._r8) then ! CNDV incompatible with dynLU
           wtcol_old(p)    = pptr%wtcol(p)
-          pptr%wtcol(p)   = pdgvs%fpcgrid(p) + &
-                     wt1 * (pdgvs%fpcgridold(p) - pdgvs%fpcgrid(p))
+          pptr%wtcol(p)   = pptr%pdgvs%fpcgrid(p) + &
+                     wt1 * (pptr%pdgvs%fpcgridold(p) - pptr%pdgvs%fpcgrid(p))
           pptr%wtlunit(p) = pptr%wtcol(p)
           pptr%wtgcell(p) = pptr%wtcol(p) * lptr%wtgcell(l)
 
           if (mon==1 .and. day==1 .and. sec==dtime .and. nstep>0) then
-             pdgvs%fpcgridold(p) = pdgvs%fpcgrid(p)
+             pptr%pdgvs%fpcgridold(p) = pptr%pdgvs%fpcgrid(p)
           end if
        end if
     end do
 
   end subroutine pftwt_interp
+#endif
 
+#ifdef CN
 !-----------------------------------------------------------------------
 !BOP
 !
@@ -2655,91 +2666,91 @@ subroutine CNHarvest (num_soilc, filter_soilc, num_soilp, filter_soilp)
 !-----------------------------------------------------------------------
 
    ! assign local pointers to pft-level arrays
-   pgridcell                      => pft%gridcell
+   pgridcell                      => clm3%g%l%c%p%gridcell
    
-   ivt                            => pft%itype
-   leafc                          => pcs%leafc
-   frootc                         => pcs%frootc
-   livestemc                      => pcs%livestemc
-   deadstemc                      => pcs%deadstemc
-   livecrootc                     => pcs%livecrootc
-   deadcrootc                     => pcs%deadcrootc
-   xsmrpool                       => pcs%xsmrpool
-   leafc_storage                  => pcs%leafc_storage
-   frootc_storage                 => pcs%frootc_storage
-   livestemc_storage              => pcs%livestemc_storage
-   deadstemc_storage              => pcs%deadstemc_storage
-   livecrootc_storage             => pcs%livecrootc_storage
-   deadcrootc_storage             => pcs%deadcrootc_storage
-   gresp_storage                  => pcs%gresp_storage
-   leafc_xfer                     => pcs%leafc_xfer
-   frootc_xfer                    => pcs%frootc_xfer
-   livestemc_xfer                 => pcs%livestemc_xfer
-   deadstemc_xfer                 => pcs%deadstemc_xfer
-   livecrootc_xfer                => pcs%livecrootc_xfer
-   deadcrootc_xfer                => pcs%deadcrootc_xfer
-   gresp_xfer                     => pcs%gresp_xfer
-   leafn                          => pns%leafn
-   frootn                         => pns%frootn
-   livestemn                      => pns%livestemn
-   deadstemn                      => pns%deadstemn
-   livecrootn                     => pns%livecrootn
-   deadcrootn                     => pns%deadcrootn
-   retransn                       => pns%retransn
-   leafn_storage                  => pns%leafn_storage
-   frootn_storage                 => pns%frootn_storage
-   livestemn_storage              => pns%livestemn_storage
-   deadstemn_storage              => pns%deadstemn_storage
-   livecrootn_storage             => pns%livecrootn_storage
-   deadcrootn_storage             => pns%deadcrootn_storage
-   leafn_xfer                     => pns%leafn_xfer
-   frootn_xfer                    => pns%frootn_xfer
-   livestemn_xfer                 => pns%livestemn_xfer
-   deadstemn_xfer                 => pns%deadstemn_xfer
-   livecrootn_xfer                => pns%livecrootn_xfer
-   deadcrootn_xfer                => pns%deadcrootn_xfer
-   hrv_leafc_to_litter              => pcf%hrv_leafc_to_litter
-   hrv_frootc_to_litter             => pcf%hrv_frootc_to_litter
-   hrv_livestemc_to_litter          => pcf%hrv_livestemc_to_litter
-   hrv_deadstemc_to_prod10c         => pcf%hrv_deadstemc_to_prod10c
-   hrv_deadstemc_to_prod100c        => pcf%hrv_deadstemc_to_prod100c
-   hrv_livecrootc_to_litter         => pcf%hrv_livecrootc_to_litter
-   hrv_deadcrootc_to_litter         => pcf%hrv_deadcrootc_to_litter
-   hrv_xsmrpool_to_atm              => pcf%hrv_xsmrpool_to_atm
-   hrv_leafc_storage_to_litter      => pcf%hrv_leafc_storage_to_litter
-   hrv_frootc_storage_to_litter     => pcf%hrv_frootc_storage_to_litter
-   hrv_livestemc_storage_to_litter  => pcf%hrv_livestemc_storage_to_litter
-   hrv_deadstemc_storage_to_litter  => pcf%hrv_deadstemc_storage_to_litter
-   hrv_livecrootc_storage_to_litter => pcf%hrv_livecrootc_storage_to_litter
-   hrv_deadcrootc_storage_to_litter => pcf%hrv_deadcrootc_storage_to_litter
-   hrv_gresp_storage_to_litter      => pcf%hrv_gresp_storage_to_litter
-   hrv_leafc_xfer_to_litter         => pcf%hrv_leafc_xfer_to_litter
-   hrv_frootc_xfer_to_litter        => pcf%hrv_frootc_xfer_to_litter
-   hrv_livestemc_xfer_to_litter     => pcf%hrv_livestemc_xfer_to_litter
-   hrv_deadstemc_xfer_to_litter     => pcf%hrv_deadstemc_xfer_to_litter
-   hrv_livecrootc_xfer_to_litter    => pcf%hrv_livecrootc_xfer_to_litter
-   hrv_deadcrootc_xfer_to_litter    => pcf%hrv_deadcrootc_xfer_to_litter
-   hrv_gresp_xfer_to_litter         => pcf%hrv_gresp_xfer_to_litter
-   hrv_leafn_to_litter              => pnf%hrv_leafn_to_litter
-   hrv_frootn_to_litter             => pnf%hrv_frootn_to_litter
-   hrv_livestemn_to_litter          => pnf%hrv_livestemn_to_litter
-   hrv_deadstemn_to_prod10n         => pnf%hrv_deadstemn_to_prod10n
-   hrv_deadstemn_to_prod100n        => pnf%hrv_deadstemn_to_prod100n
-   hrv_livecrootn_to_litter         => pnf%hrv_livecrootn_to_litter
-   hrv_deadcrootn_to_litter         => pnf%hrv_deadcrootn_to_litter
-   hrv_retransn_to_litter           => pnf%hrv_retransn_to_litter
-   hrv_leafn_storage_to_litter      => pnf%hrv_leafn_storage_to_litter
-   hrv_frootn_storage_to_litter     => pnf%hrv_frootn_storage_to_litter
-   hrv_livestemn_storage_to_litter  => pnf%hrv_livestemn_storage_to_litter
-   hrv_deadstemn_storage_to_litter  => pnf%hrv_deadstemn_storage_to_litter
-   hrv_livecrootn_storage_to_litter => pnf%hrv_livecrootn_storage_to_litter
-   hrv_deadcrootn_storage_to_litter => pnf%hrv_deadcrootn_storage_to_litter
-   hrv_leafn_xfer_to_litter         => pnf%hrv_leafn_xfer_to_litter
-   hrv_frootn_xfer_to_litter        => pnf%hrv_frootn_xfer_to_litter
-   hrv_livestemn_xfer_to_litter     => pnf%hrv_livestemn_xfer_to_litter
-   hrv_deadstemn_xfer_to_litter     => pnf%hrv_deadstemn_xfer_to_litter
-   hrv_livecrootn_xfer_to_litter    => pnf%hrv_livecrootn_xfer_to_litter
-   hrv_deadcrootn_xfer_to_litter    => pnf%hrv_deadcrootn_xfer_to_litter
+   ivt                            => clm3%g%l%c%p%itype
+   leafc                          => clm3%g%l%c%p%pcs%leafc
+   frootc                         => clm3%g%l%c%p%pcs%frootc
+   livestemc                      => clm3%g%l%c%p%pcs%livestemc
+   deadstemc                      => clm3%g%l%c%p%pcs%deadstemc
+   livecrootc                     => clm3%g%l%c%p%pcs%livecrootc
+   deadcrootc                     => clm3%g%l%c%p%pcs%deadcrootc
+   xsmrpool                       => clm3%g%l%c%p%pcs%xsmrpool
+   leafc_storage                  => clm3%g%l%c%p%pcs%leafc_storage
+   frootc_storage                 => clm3%g%l%c%p%pcs%frootc_storage
+   livestemc_storage              => clm3%g%l%c%p%pcs%livestemc_storage
+   deadstemc_storage              => clm3%g%l%c%p%pcs%deadstemc_storage
+   livecrootc_storage             => clm3%g%l%c%p%pcs%livecrootc_storage
+   deadcrootc_storage             => clm3%g%l%c%p%pcs%deadcrootc_storage
+   gresp_storage                  => clm3%g%l%c%p%pcs%gresp_storage
+   leafc_xfer                     => clm3%g%l%c%p%pcs%leafc_xfer
+   frootc_xfer                    => clm3%g%l%c%p%pcs%frootc_xfer
+   livestemc_xfer                 => clm3%g%l%c%p%pcs%livestemc_xfer
+   deadstemc_xfer                 => clm3%g%l%c%p%pcs%deadstemc_xfer
+   livecrootc_xfer                => clm3%g%l%c%p%pcs%livecrootc_xfer
+   deadcrootc_xfer                => clm3%g%l%c%p%pcs%deadcrootc_xfer
+   gresp_xfer                     => clm3%g%l%c%p%pcs%gresp_xfer
+   leafn                          => clm3%g%l%c%p%pns%leafn
+   frootn                         => clm3%g%l%c%p%pns%frootn
+   livestemn                      => clm3%g%l%c%p%pns%livestemn
+   deadstemn                      => clm3%g%l%c%p%pns%deadstemn
+   livecrootn                     => clm3%g%l%c%p%pns%livecrootn
+   deadcrootn                     => clm3%g%l%c%p%pns%deadcrootn
+   retransn                       => clm3%g%l%c%p%pns%retransn
+   leafn_storage                  => clm3%g%l%c%p%pns%leafn_storage
+   frootn_storage                 => clm3%g%l%c%p%pns%frootn_storage
+   livestemn_storage              => clm3%g%l%c%p%pns%livestemn_storage
+   deadstemn_storage              => clm3%g%l%c%p%pns%deadstemn_storage
+   livecrootn_storage             => clm3%g%l%c%p%pns%livecrootn_storage
+   deadcrootn_storage             => clm3%g%l%c%p%pns%deadcrootn_storage
+   leafn_xfer                     => clm3%g%l%c%p%pns%leafn_xfer
+   frootn_xfer                    => clm3%g%l%c%p%pns%frootn_xfer
+   livestemn_xfer                 => clm3%g%l%c%p%pns%livestemn_xfer
+   deadstemn_xfer                 => clm3%g%l%c%p%pns%deadstemn_xfer
+   livecrootn_xfer                => clm3%g%l%c%p%pns%livecrootn_xfer
+   deadcrootn_xfer                => clm3%g%l%c%p%pns%deadcrootn_xfer
+   hrv_leafc_to_litter              => clm3%g%l%c%p%pcf%hrv_leafc_to_litter
+   hrv_frootc_to_litter             => clm3%g%l%c%p%pcf%hrv_frootc_to_litter
+   hrv_livestemc_to_litter          => clm3%g%l%c%p%pcf%hrv_livestemc_to_litter
+   hrv_deadstemc_to_prod10c         => clm3%g%l%c%p%pcf%hrv_deadstemc_to_prod10c
+   hrv_deadstemc_to_prod100c        => clm3%g%l%c%p%pcf%hrv_deadstemc_to_prod100c
+   hrv_livecrootc_to_litter         => clm3%g%l%c%p%pcf%hrv_livecrootc_to_litter
+   hrv_deadcrootc_to_litter         => clm3%g%l%c%p%pcf%hrv_deadcrootc_to_litter
+   hrv_xsmrpool_to_atm              => clm3%g%l%c%p%pcf%hrv_xsmrpool_to_atm
+   hrv_leafc_storage_to_litter      => clm3%g%l%c%p%pcf%hrv_leafc_storage_to_litter
+   hrv_frootc_storage_to_litter     => clm3%g%l%c%p%pcf%hrv_frootc_storage_to_litter
+   hrv_livestemc_storage_to_litter  => clm3%g%l%c%p%pcf%hrv_livestemc_storage_to_litter
+   hrv_deadstemc_storage_to_litter  => clm3%g%l%c%p%pcf%hrv_deadstemc_storage_to_litter
+   hrv_livecrootc_storage_to_litter => clm3%g%l%c%p%pcf%hrv_livecrootc_storage_to_litter
+   hrv_deadcrootc_storage_to_litter => clm3%g%l%c%p%pcf%hrv_deadcrootc_storage_to_litter
+   hrv_gresp_storage_to_litter      => clm3%g%l%c%p%pcf%hrv_gresp_storage_to_litter
+   hrv_leafc_xfer_to_litter         => clm3%g%l%c%p%pcf%hrv_leafc_xfer_to_litter
+   hrv_frootc_xfer_to_litter        => clm3%g%l%c%p%pcf%hrv_frootc_xfer_to_litter
+   hrv_livestemc_xfer_to_litter     => clm3%g%l%c%p%pcf%hrv_livestemc_xfer_to_litter
+   hrv_deadstemc_xfer_to_litter     => clm3%g%l%c%p%pcf%hrv_deadstemc_xfer_to_litter
+   hrv_livecrootc_xfer_to_litter    => clm3%g%l%c%p%pcf%hrv_livecrootc_xfer_to_litter
+   hrv_deadcrootc_xfer_to_litter    => clm3%g%l%c%p%pcf%hrv_deadcrootc_xfer_to_litter
+   hrv_gresp_xfer_to_litter         => clm3%g%l%c%p%pcf%hrv_gresp_xfer_to_litter
+   hrv_leafn_to_litter              => clm3%g%l%c%p%pnf%hrv_leafn_to_litter
+   hrv_frootn_to_litter             => clm3%g%l%c%p%pnf%hrv_frootn_to_litter
+   hrv_livestemn_to_litter          => clm3%g%l%c%p%pnf%hrv_livestemn_to_litter
+   hrv_deadstemn_to_prod10n         => clm3%g%l%c%p%pnf%hrv_deadstemn_to_prod10n
+   hrv_deadstemn_to_prod100n        => clm3%g%l%c%p%pnf%hrv_deadstemn_to_prod100n
+   hrv_livecrootn_to_litter         => clm3%g%l%c%p%pnf%hrv_livecrootn_to_litter
+   hrv_deadcrootn_to_litter         => clm3%g%l%c%p%pnf%hrv_deadcrootn_to_litter
+   hrv_retransn_to_litter           => clm3%g%l%c%p%pnf%hrv_retransn_to_litter
+   hrv_leafn_storage_to_litter      => clm3%g%l%c%p%pnf%hrv_leafn_storage_to_litter
+   hrv_frootn_storage_to_litter     => clm3%g%l%c%p%pnf%hrv_frootn_storage_to_litter
+   hrv_livestemn_storage_to_litter  => clm3%g%l%c%p%pnf%hrv_livestemn_storage_to_litter
+   hrv_deadstemn_storage_to_litter  => clm3%g%l%c%p%pnf%hrv_deadstemn_storage_to_litter
+   hrv_livecrootn_storage_to_litter => clm3%g%l%c%p%pnf%hrv_livecrootn_storage_to_litter
+   hrv_deadcrootn_storage_to_litter => clm3%g%l%c%p%pnf%hrv_deadcrootn_storage_to_litter
+   hrv_leafn_xfer_to_litter         => clm3%g%l%c%p%pnf%hrv_leafn_xfer_to_litter
+   hrv_frootn_xfer_to_litter        => clm3%g%l%c%p%pnf%hrv_frootn_xfer_to_litter
+   hrv_livestemn_xfer_to_litter     => clm3%g%l%c%p%pnf%hrv_livestemn_xfer_to_litter
+   hrv_deadstemn_xfer_to_litter     => clm3%g%l%c%p%pnf%hrv_deadstemn_xfer_to_litter
+   hrv_livecrootn_xfer_to_litter    => clm3%g%l%c%p%pnf%hrv_livecrootn_xfer_to_litter
+   hrv_deadcrootn_xfer_to_litter    => clm3%g%l%c%p%pnf%hrv_deadcrootn_xfer_to_litter
 
 
    days_per_year = get_days_per_year()
@@ -2984,103 +2995,103 @@ subroutine CNHarvestPftToColumn (num_soilc, filter_soilc)
    fr_flig                        => pftcon%fr_flig
 
    ! assign local pointers to column-level arrays
-   npfts                          => col%npfts
-   pfti                           => col%pfti
-   hrv_leafc_to_litr1c              => ccf%hrv_leafc_to_litr1c
-   hrv_leafc_to_litr2c              => ccf%hrv_leafc_to_litr2c
-   hrv_leafc_to_litr3c              => ccf%hrv_leafc_to_litr3c
-   hrv_frootc_to_litr1c             => ccf%hrv_frootc_to_litr1c
-   hrv_frootc_to_litr2c             => ccf%hrv_frootc_to_litr2c
-   hrv_frootc_to_litr3c             => ccf%hrv_frootc_to_litr3c
-   hrv_livestemc_to_cwdc            => ccf%hrv_livestemc_to_cwdc
-   chrv_deadstemc_to_prod10c        => ccf%hrv_deadstemc_to_prod10c
-   chrv_deadstemc_to_prod100c       => ccf%hrv_deadstemc_to_prod100c
-   hrv_livecrootc_to_cwdc           => ccf%hrv_livecrootc_to_cwdc
-   hrv_deadcrootc_to_cwdc           => ccf%hrv_deadcrootc_to_cwdc
-   hrv_leafc_storage_to_litr1c      => ccf%hrv_leafc_storage_to_litr1c
-   hrv_frootc_storage_to_litr1c     => ccf%hrv_frootc_storage_to_litr1c
-   hrv_livestemc_storage_to_litr1c  => ccf%hrv_livestemc_storage_to_litr1c
-   hrv_deadstemc_storage_to_litr1c  => ccf%hrv_deadstemc_storage_to_litr1c
-   hrv_livecrootc_storage_to_litr1c => ccf%hrv_livecrootc_storage_to_litr1c
-   hrv_deadcrootc_storage_to_litr1c => ccf%hrv_deadcrootc_storage_to_litr1c
-   hrv_gresp_storage_to_litr1c      => ccf%hrv_gresp_storage_to_litr1c
-   hrv_leafc_xfer_to_litr1c         => ccf%hrv_leafc_xfer_to_litr1c
-   hrv_frootc_xfer_to_litr1c        => ccf%hrv_frootc_xfer_to_litr1c
-   hrv_livestemc_xfer_to_litr1c     => ccf%hrv_livestemc_xfer_to_litr1c
-   hrv_deadstemc_xfer_to_litr1c     => ccf%hrv_deadstemc_xfer_to_litr1c
-   hrv_livecrootc_xfer_to_litr1c    => ccf%hrv_livecrootc_xfer_to_litr1c
-   hrv_deadcrootc_xfer_to_litr1c    => ccf%hrv_deadcrootc_xfer_to_litr1c
-   hrv_gresp_xfer_to_litr1c         => ccf%hrv_gresp_xfer_to_litr1c
-   hrv_leafn_to_litr1n              => cnf%hrv_leafn_to_litr1n
-   hrv_leafn_to_litr2n              => cnf%hrv_leafn_to_litr2n
-   hrv_leafn_to_litr3n              => cnf%hrv_leafn_to_litr3n
-   hrv_frootn_to_litr1n             => cnf%hrv_frootn_to_litr1n
-   hrv_frootn_to_litr2n             => cnf%hrv_frootn_to_litr2n
-   hrv_frootn_to_litr3n             => cnf%hrv_frootn_to_litr3n
-   hrv_livestemn_to_cwdn            => cnf%hrv_livestemn_to_cwdn
-   chrv_deadstemn_to_prod10n        => cnf%hrv_deadstemn_to_prod10n
-   chrv_deadstemn_to_prod100n       => cnf%hrv_deadstemn_to_prod100n
-   hrv_livecrootn_to_cwdn           => cnf%hrv_livecrootn_to_cwdn
-   hrv_deadcrootn_to_cwdn           => cnf%hrv_deadcrootn_to_cwdn
-   hrv_retransn_to_litr1n           => cnf%hrv_retransn_to_litr1n
-   hrv_leafn_storage_to_litr1n      => cnf%hrv_leafn_storage_to_litr1n
-   hrv_frootn_storage_to_litr1n     => cnf%hrv_frootn_storage_to_litr1n
-   hrv_livestemn_storage_to_litr1n  => cnf%hrv_livestemn_storage_to_litr1n
-   hrv_deadstemn_storage_to_litr1n  => cnf%hrv_deadstemn_storage_to_litr1n
-   hrv_livecrootn_storage_to_litr1n => cnf%hrv_livecrootn_storage_to_litr1n
-   hrv_deadcrootn_storage_to_litr1n => cnf%hrv_deadcrootn_storage_to_litr1n
-   hrv_leafn_xfer_to_litr1n         => cnf%hrv_leafn_xfer_to_litr1n
-   hrv_frootn_xfer_to_litr1n        => cnf%hrv_frootn_xfer_to_litr1n
-   hrv_livestemn_xfer_to_litr1n     => cnf%hrv_livestemn_xfer_to_litr1n
-   hrv_deadstemn_xfer_to_litr1n     => cnf%hrv_deadstemn_xfer_to_litr1n
-   hrv_livecrootn_xfer_to_litr1n    => cnf%hrv_livecrootn_xfer_to_litr1n
-   hrv_deadcrootn_xfer_to_litr1n    => cnf%hrv_deadcrootn_xfer_to_litr1n
+   npfts                          => clm3%g%l%c%npfts
+   pfti                           => clm3%g%l%c%pfti
+   hrv_leafc_to_litr1c              => clm3%g%l%c%ccf%hrv_leafc_to_litr1c
+   hrv_leafc_to_litr2c              => clm3%g%l%c%ccf%hrv_leafc_to_litr2c
+   hrv_leafc_to_litr3c              => clm3%g%l%c%ccf%hrv_leafc_to_litr3c
+   hrv_frootc_to_litr1c             => clm3%g%l%c%ccf%hrv_frootc_to_litr1c
+   hrv_frootc_to_litr2c             => clm3%g%l%c%ccf%hrv_frootc_to_litr2c
+   hrv_frootc_to_litr3c             => clm3%g%l%c%ccf%hrv_frootc_to_litr3c
+   hrv_livestemc_to_cwdc            => clm3%g%l%c%ccf%hrv_livestemc_to_cwdc
+   chrv_deadstemc_to_prod10c        => clm3%g%l%c%ccf%hrv_deadstemc_to_prod10c
+   chrv_deadstemc_to_prod100c       => clm3%g%l%c%ccf%hrv_deadstemc_to_prod100c
+   hrv_livecrootc_to_cwdc           => clm3%g%l%c%ccf%hrv_livecrootc_to_cwdc
+   hrv_deadcrootc_to_cwdc           => clm3%g%l%c%ccf%hrv_deadcrootc_to_cwdc
+   hrv_leafc_storage_to_litr1c      => clm3%g%l%c%ccf%hrv_leafc_storage_to_litr1c
+   hrv_frootc_storage_to_litr1c     => clm3%g%l%c%ccf%hrv_frootc_storage_to_litr1c
+   hrv_livestemc_storage_to_litr1c  => clm3%g%l%c%ccf%hrv_livestemc_storage_to_litr1c
+   hrv_deadstemc_storage_to_litr1c  => clm3%g%l%c%ccf%hrv_deadstemc_storage_to_litr1c
+   hrv_livecrootc_storage_to_litr1c => clm3%g%l%c%ccf%hrv_livecrootc_storage_to_litr1c
+   hrv_deadcrootc_storage_to_litr1c => clm3%g%l%c%ccf%hrv_deadcrootc_storage_to_litr1c
+   hrv_gresp_storage_to_litr1c      => clm3%g%l%c%ccf%hrv_gresp_storage_to_litr1c
+   hrv_leafc_xfer_to_litr1c         => clm3%g%l%c%ccf%hrv_leafc_xfer_to_litr1c
+   hrv_frootc_xfer_to_litr1c        => clm3%g%l%c%ccf%hrv_frootc_xfer_to_litr1c
+   hrv_livestemc_xfer_to_litr1c     => clm3%g%l%c%ccf%hrv_livestemc_xfer_to_litr1c
+   hrv_deadstemc_xfer_to_litr1c     => clm3%g%l%c%ccf%hrv_deadstemc_xfer_to_litr1c
+   hrv_livecrootc_xfer_to_litr1c    => clm3%g%l%c%ccf%hrv_livecrootc_xfer_to_litr1c
+   hrv_deadcrootc_xfer_to_litr1c    => clm3%g%l%c%ccf%hrv_deadcrootc_xfer_to_litr1c
+   hrv_gresp_xfer_to_litr1c         => clm3%g%l%c%ccf%hrv_gresp_xfer_to_litr1c
+   hrv_leafn_to_litr1n              => clm3%g%l%c%cnf%hrv_leafn_to_litr1n
+   hrv_leafn_to_litr2n              => clm3%g%l%c%cnf%hrv_leafn_to_litr2n
+   hrv_leafn_to_litr3n              => clm3%g%l%c%cnf%hrv_leafn_to_litr3n
+   hrv_frootn_to_litr1n             => clm3%g%l%c%cnf%hrv_frootn_to_litr1n
+   hrv_frootn_to_litr2n             => clm3%g%l%c%cnf%hrv_frootn_to_litr2n
+   hrv_frootn_to_litr3n             => clm3%g%l%c%cnf%hrv_frootn_to_litr3n
+   hrv_livestemn_to_cwdn            => clm3%g%l%c%cnf%hrv_livestemn_to_cwdn
+   chrv_deadstemn_to_prod10n        => clm3%g%l%c%cnf%hrv_deadstemn_to_prod10n
+   chrv_deadstemn_to_prod100n       => clm3%g%l%c%cnf%hrv_deadstemn_to_prod100n
+   hrv_livecrootn_to_cwdn           => clm3%g%l%c%cnf%hrv_livecrootn_to_cwdn
+   hrv_deadcrootn_to_cwdn           => clm3%g%l%c%cnf%hrv_deadcrootn_to_cwdn
+   hrv_retransn_to_litr1n           => clm3%g%l%c%cnf%hrv_retransn_to_litr1n
+   hrv_leafn_storage_to_litr1n      => clm3%g%l%c%cnf%hrv_leafn_storage_to_litr1n
+   hrv_frootn_storage_to_litr1n     => clm3%g%l%c%cnf%hrv_frootn_storage_to_litr1n
+   hrv_livestemn_storage_to_litr1n  => clm3%g%l%c%cnf%hrv_livestemn_storage_to_litr1n
+   hrv_deadstemn_storage_to_litr1n  => clm3%g%l%c%cnf%hrv_deadstemn_storage_to_litr1n
+   hrv_livecrootn_storage_to_litr1n => clm3%g%l%c%cnf%hrv_livecrootn_storage_to_litr1n
+   hrv_deadcrootn_storage_to_litr1n => clm3%g%l%c%cnf%hrv_deadcrootn_storage_to_litr1n
+   hrv_leafn_xfer_to_litr1n         => clm3%g%l%c%cnf%hrv_leafn_xfer_to_litr1n
+   hrv_frootn_xfer_to_litr1n        => clm3%g%l%c%cnf%hrv_frootn_xfer_to_litr1n
+   hrv_livestemn_xfer_to_litr1n     => clm3%g%l%c%cnf%hrv_livestemn_xfer_to_litr1n
+   hrv_deadstemn_xfer_to_litr1n     => clm3%g%l%c%cnf%hrv_deadstemn_xfer_to_litr1n
+   hrv_livecrootn_xfer_to_litr1n    => clm3%g%l%c%cnf%hrv_livecrootn_xfer_to_litr1n
+   hrv_deadcrootn_xfer_to_litr1n    => clm3%g%l%c%cnf%hrv_deadcrootn_xfer_to_litr1n
 
    ! assign local pointers to pft-level arrays
-   ivt                            => pft%itype
-   wtcol                          => pft%wtcol
-   pwtgcell                       => pft%wtgcell  
-   hrv_leafc_to_litter              => pcf%hrv_leafc_to_litter
-   hrv_frootc_to_litter             => pcf%hrv_frootc_to_litter
-   hrv_livestemc_to_litter          => pcf%hrv_livestemc_to_litter
-   phrv_deadstemc_to_prod10c        => pcf%hrv_deadstemc_to_prod10c
-   phrv_deadstemc_to_prod100c       => pcf%hrv_deadstemc_to_prod100c
-   hrv_livecrootc_to_litter         => pcf%hrv_livecrootc_to_litter
-   hrv_deadcrootc_to_litter         => pcf%hrv_deadcrootc_to_litter
-   hrv_leafc_storage_to_litter      => pcf%hrv_leafc_storage_to_litter
-   hrv_frootc_storage_to_litter     => pcf%hrv_frootc_storage_to_litter
-   hrv_livestemc_storage_to_litter  => pcf%hrv_livestemc_storage_to_litter
-   hrv_deadstemc_storage_to_litter  => pcf%hrv_deadstemc_storage_to_litter
-   hrv_livecrootc_storage_to_litter => pcf%hrv_livecrootc_storage_to_litter
-   hrv_deadcrootc_storage_to_litter => pcf%hrv_deadcrootc_storage_to_litter
-   hrv_gresp_storage_to_litter      => pcf%hrv_gresp_storage_to_litter
-   hrv_leafc_xfer_to_litter         => pcf%hrv_leafc_xfer_to_litter
-   hrv_frootc_xfer_to_litter        => pcf%hrv_frootc_xfer_to_litter
-   hrv_livestemc_xfer_to_litter     => pcf%hrv_livestemc_xfer_to_litter
-   hrv_deadstemc_xfer_to_litter     => pcf%hrv_deadstemc_xfer_to_litter
-   hrv_livecrootc_xfer_to_litter    => pcf%hrv_livecrootc_xfer_to_litter
-   hrv_deadcrootc_xfer_to_litter    => pcf%hrv_deadcrootc_xfer_to_litter
-   hrv_gresp_xfer_to_litter         => pcf%hrv_gresp_xfer_to_litter
-   hrv_leafn_to_litter              => pnf%hrv_leafn_to_litter
-   hrv_frootn_to_litter             => pnf%hrv_frootn_to_litter
-   hrv_livestemn_to_litter          => pnf%hrv_livestemn_to_litter
-   phrv_deadstemn_to_prod10n        => pnf%hrv_deadstemn_to_prod10n
-   phrv_deadstemn_to_prod100n       => pnf%hrv_deadstemn_to_prod100n
-   hrv_livecrootn_to_litter         => pnf%hrv_livecrootn_to_litter
-   hrv_deadcrootn_to_litter         => pnf%hrv_deadcrootn_to_litter
-   hrv_retransn_to_litter           => pnf%hrv_retransn_to_litter
-   hrv_leafn_storage_to_litter      => pnf%hrv_leafn_storage_to_litter
-   hrv_frootn_storage_to_litter     => pnf%hrv_frootn_storage_to_litter
-   hrv_livestemn_storage_to_litter  => pnf%hrv_livestemn_storage_to_litter
-   hrv_deadstemn_storage_to_litter  => pnf%hrv_deadstemn_storage_to_litter
-   hrv_livecrootn_storage_to_litter => pnf%hrv_livecrootn_storage_to_litter
-   hrv_deadcrootn_storage_to_litter => pnf%hrv_deadcrootn_storage_to_litter
-   hrv_leafn_xfer_to_litter         => pnf%hrv_leafn_xfer_to_litter
-   hrv_frootn_xfer_to_litter        => pnf%hrv_frootn_xfer_to_litter
-   hrv_livestemn_xfer_to_litter     => pnf%hrv_livestemn_xfer_to_litter
-   hrv_deadstemn_xfer_to_litter     => pnf%hrv_deadstemn_xfer_to_litter
-   hrv_livecrootn_xfer_to_litter    => pnf%hrv_livecrootn_xfer_to_litter
-   hrv_deadcrootn_xfer_to_litter    => pnf%hrv_deadcrootn_xfer_to_litter
+   ivt                            => clm3%g%l%c%p%itype
+   wtcol                          => clm3%g%l%c%p%wtcol
+   pwtgcell                       => clm3%g%l%c%p%wtgcell  
+   hrv_leafc_to_litter              => clm3%g%l%c%p%pcf%hrv_leafc_to_litter
+   hrv_frootc_to_litter             => clm3%g%l%c%p%pcf%hrv_frootc_to_litter
+   hrv_livestemc_to_litter          => clm3%g%l%c%p%pcf%hrv_livestemc_to_litter
+   phrv_deadstemc_to_prod10c        => clm3%g%l%c%p%pcf%hrv_deadstemc_to_prod10c
+   phrv_deadstemc_to_prod100c       => clm3%g%l%c%p%pcf%hrv_deadstemc_to_prod100c
+   hrv_livecrootc_to_litter         => clm3%g%l%c%p%pcf%hrv_livecrootc_to_litter
+   hrv_deadcrootc_to_litter         => clm3%g%l%c%p%pcf%hrv_deadcrootc_to_litter
+   hrv_leafc_storage_to_litter      => clm3%g%l%c%p%pcf%hrv_leafc_storage_to_litter
+   hrv_frootc_storage_to_litter     => clm3%g%l%c%p%pcf%hrv_frootc_storage_to_litter
+   hrv_livestemc_storage_to_litter  => clm3%g%l%c%p%pcf%hrv_livestemc_storage_to_litter
+   hrv_deadstemc_storage_to_litter  => clm3%g%l%c%p%pcf%hrv_deadstemc_storage_to_litter
+   hrv_livecrootc_storage_to_litter => clm3%g%l%c%p%pcf%hrv_livecrootc_storage_to_litter
+   hrv_deadcrootc_storage_to_litter => clm3%g%l%c%p%pcf%hrv_deadcrootc_storage_to_litter
+   hrv_gresp_storage_to_litter      => clm3%g%l%c%p%pcf%hrv_gresp_storage_to_litter
+   hrv_leafc_xfer_to_litter         => clm3%g%l%c%p%pcf%hrv_leafc_xfer_to_litter
+   hrv_frootc_xfer_to_litter        => clm3%g%l%c%p%pcf%hrv_frootc_xfer_to_litter
+   hrv_livestemc_xfer_to_litter     => clm3%g%l%c%p%pcf%hrv_livestemc_xfer_to_litter
+   hrv_deadstemc_xfer_to_litter     => clm3%g%l%c%p%pcf%hrv_deadstemc_xfer_to_litter
+   hrv_livecrootc_xfer_to_litter    => clm3%g%l%c%p%pcf%hrv_livecrootc_xfer_to_litter
+   hrv_deadcrootc_xfer_to_litter    => clm3%g%l%c%p%pcf%hrv_deadcrootc_xfer_to_litter
+   hrv_gresp_xfer_to_litter         => clm3%g%l%c%p%pcf%hrv_gresp_xfer_to_litter
+   hrv_leafn_to_litter              => clm3%g%l%c%p%pnf%hrv_leafn_to_litter
+   hrv_frootn_to_litter             => clm3%g%l%c%p%pnf%hrv_frootn_to_litter
+   hrv_livestemn_to_litter          => clm3%g%l%c%p%pnf%hrv_livestemn_to_litter
+   phrv_deadstemn_to_prod10n        => clm3%g%l%c%p%pnf%hrv_deadstemn_to_prod10n
+   phrv_deadstemn_to_prod100n       => clm3%g%l%c%p%pnf%hrv_deadstemn_to_prod100n
+   hrv_livecrootn_to_litter         => clm3%g%l%c%p%pnf%hrv_livecrootn_to_litter
+   hrv_deadcrootn_to_litter         => clm3%g%l%c%p%pnf%hrv_deadcrootn_to_litter
+   hrv_retransn_to_litter           => clm3%g%l%c%p%pnf%hrv_retransn_to_litter
+   hrv_leafn_storage_to_litter      => clm3%g%l%c%p%pnf%hrv_leafn_storage_to_litter
+   hrv_frootn_storage_to_litter     => clm3%g%l%c%p%pnf%hrv_frootn_storage_to_litter
+   hrv_livestemn_storage_to_litter  => clm3%g%l%c%p%pnf%hrv_livestemn_storage_to_litter
+   hrv_deadstemn_storage_to_litter  => clm3%g%l%c%p%pnf%hrv_deadstemn_storage_to_litter
+   hrv_livecrootn_storage_to_litter => clm3%g%l%c%p%pnf%hrv_livecrootn_storage_to_litter
+   hrv_deadcrootn_storage_to_litter => clm3%g%l%c%p%pnf%hrv_deadcrootn_storage_to_litter
+   hrv_leafn_xfer_to_litter         => clm3%g%l%c%p%pnf%hrv_leafn_xfer_to_litter
+   hrv_frootn_xfer_to_litter        => clm3%g%l%c%p%pnf%hrv_frootn_xfer_to_litter
+   hrv_livestemn_xfer_to_litter     => clm3%g%l%c%p%pnf%hrv_livestemn_xfer_to_litter
+   hrv_deadstemn_xfer_to_litter     => clm3%g%l%c%p%pnf%hrv_deadstemn_xfer_to_litter
+   hrv_livecrootn_xfer_to_litter    => clm3%g%l%c%p%pnf%hrv_livecrootn_xfer_to_litter
+   hrv_deadcrootn_xfer_to_litter    => clm3%g%l%c%p%pnf%hrv_deadcrootn_xfer_to_litter
 
    do pi = 1,maxpatch_pft
       do fc = 1,num_soilc
@@ -3220,5 +3231,6 @@ subroutine CNHarvestPftToColumn (num_soilc, filter_soilc)
 
 end subroutine CNHarvestPftToColumn
 !-----------------------------------------------------------------------
+#endif
 
 end module pftdynMod

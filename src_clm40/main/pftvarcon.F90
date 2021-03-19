@@ -13,7 +13,7 @@ module pftvarcon
   use shr_kind_mod, only : r8 => shr_kind_r8
   use abortutils  , only : endrun
   use clm_varpar  , only : mxpft, numpft, numrad, ivis, inir
-  use clm_varctl  , only : iulog, use_cn, use_cndv
+  use clm_varctl  , only : iulog
 !
 ! !PUBLIC TYPES:
   implicit none
@@ -143,10 +143,60 @@ module pftvarcon
   real(r8), parameter :: allom3 =   0.5_r8   !...equations
   real(r8), parameter :: allom1s = 250.0_r8  !modified for shrubs by
   real(r8), parameter :: allom2s =   8.0_r8  !X.D.Z
+
+  ! additional non-pft specific parameters added by DMR 7/1/11
+  ! CNAllocationMod.F90
+  real(r8):: bdnr_d          !bulk denitrification rate (per day)
+  real(r8):: dayscrecover    !days to recover negative cpool
+  real(r8):: rc_npool        !resistance term for plant uptake from npool
+  ! CNMRespMod.F90
+  real(r8):: br_mr           !base rate for maintenace respiration
+  real(r8):: q10_mr          !q10 for maintenance respiration
+  ! CNDecompMod.F90
+  real(r8):: cn_s1_in        !C:N for SOM 1
+  real(r8):: cn_s2_in        !C:N for SOM 2
+  real(r8):: cn_s3_in        !C:N for SOM 3
+  real(r8):: cn_s4_in        !C:N for SOM 4
+  real(r8):: rf_l1s1_in      !respiration fraction litter 1 -> SOM 1
+  real(r8):: rf_l2s2_in      !respiration fraction litter 2 -> SOM 2
+  real(r8):: rf_l3s3_in      !respiration fraction litter 3 -> SOM 3
+  real(r8):: rf_s1s2_in      !respiration fraction SOM 1 -> SOM 2
+  real(r8):: rf_s2s3_in      !respiration fraction SOM 2 -> SOM 3
+  real(r8):: rf_s3s4_in      !respiration fraction SOM 3 -> SOM 4
+  real(r8):: k_l1_in         !decomposition rate constant litter 1
+  real(r8):: k_l2_in         !decomposition rate constant litter 2
+  real(r8):: k_l3_in         !decomposition rate constant litter 3
+  real(r8):: k_s1_in         !decomposition rate constant SOM 1
+  real(r8):: k_s2_in         !decomposition rate constant SOM 2
+  real(r8):: k_s3_in         !decomposition rate constant SOM 3
+  real(r8):: k_s4_in         !decomposition rate constant SOM 3
+  real(r8):: k_frag_in       !fragmentation rate constant CWD
+  real(r8):: cwd_fcel_in     !cellulose fraction of coarse woody debris
+  real(r8):: dnp             !denitrification proportion
+  real(r8):: minpsi_hr       !minimum soil water potential for heterotrophic respiration
+  real(r8):: q10_hr          !q10 for heterotrophic respiration
+  !  CNGapMortalityMod.F90
+  real(r8):: r_mort          !mortality rate (non-DV mode)
+  !  CNNDynamicsMod.F90
+  real(r8):: sf_minn         !soluble fraction of mineral nitrogen
+  !  CPhenologyMod.F90  
+  real(r8):: crit_dayl_in        !critical day length for leaf offset
+  real(r8):: ndays_on_in         !number of days to complete leaf onset
+  real(r8):: ndays_off_in        !number of days to complete leaf offset
+  real(r8):: fstor2tran_in       !fraction of storage to move to transfer on each onset
+  real(r8):: crit_onset_fdd_in   !critical number of freezing days to set counter for gdd
+  real(r8):: crit_onset_swi_in   !critical number of days with suff. moisture for leaf onset
+  real(r8):: soilpsi_on_in       !critical soil water potential for leaf onset
+  real(r8):: crit_offset_fdd_in  !critical number of freezing days for leaf offset
+  real(r8):: crit_offset_swi_in  !critical number of water stress days for leaf offset
+  real(r8):: soilpsi_off_in      !critical soil water potential for leaf offset
+  real(r8):: lwtop_ann_in        !live wood turnover proportion (annual basis)
+  real(r8):: gddfunc_p1_in       !1st parameter in calculating threshold GDD(Tann)
+  real(r8):: gddfunc_p2_in       !2nd parameter in calculating threshold GDD(Tann)
 !
 ! !PUBLIC MEMBER FUNCTIONS:
   public :: pftconrd ! Read and initialize vegetation (PFT) constants
-!
+
 ! !REVISION HISTORY:
 ! Created by Sam Levis (put into module form by Mariana Vertenstein)
 ! 10/21/03, Peter Thornton: Added new variables for CN code
@@ -175,7 +225,8 @@ contains
                            ncd_inqdid, ncd_inqdlen
     use clm_varctl, only : fpftcon
     use clm_varcon, only : tfrz
-    use spmdMod   , only : masterproc
+    use spmdMod   , only : masterproc, mpicom, MPI_REAL8, MPI_CHARACTER, MPI_INTEGER
+    use nanMod    , only : nan
 !
 ! !ARGUMENTS:
     implicit none
@@ -409,6 +460,94 @@ contains
     if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
     call ncd_io('max_SH_planting_date',mxSHplantdate, 'read', ncid, readvar=readv)  
     if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('max_SH_planting_date',mxSHplantdate, 'read', ncid, readvar=readv)  
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    !BEGIN PARAMETER ADDITIONS DMR 7/1/11
+    call ncd_io('bdnr',bdnr_d, 'read', ncid, readvar=readv)
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('dayscrecover',dayscrecover, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('rc_npool',rc_npool, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('br_mr',br_mr, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('q10_mr',q10_mr, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('cn_s1',cn_s1_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('cn_s2',cn_s2_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('cn_s3',cn_s3_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('cn_s4',cn_s4_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('rf_l1s1',rf_l1s1_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('rf_l2s2',rf_l2s2_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('rf_l3s3',rf_l3s3_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('rf_s1s2',rf_s1s2_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('rf_s2s3',rf_s2s3_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('rf_s3s4',rf_s3s4_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('k_l1',k_l1_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('k_l2',k_l2_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('k_l3',k_l3_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('k_s1',k_s1_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('k_s2',k_s2_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('k_s3',k_s3_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('k_s4',k_s4_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('k_frag',k_frag_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('cwd_fcel',cwd_fcel_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('dnp',dnp, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('minpsi_hr',minpsi_hr, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('q10_hr',q10_hr, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('r_mort',r_mort, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('sf_minn',sf_minn, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('crit_dayl',crit_dayl_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('ndays_on',ndays_on_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('ndays_off',ndays_off_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('fstor2tran',fstor2tran_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('crit_onset_fdd',crit_onset_fdd_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('crit_onset_swi',crit_onset_swi_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('soilpsi_on',soilpsi_on_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('crit_offset_fdd',crit_offset_fdd_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('crit_offset_swi',crit_offset_swi_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('soilpsi_off',soilpsi_off_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('lwtop_ann',lwtop_ann_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('gddfunc_p1',gddfunc_p1_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    call ncd_io('gddfunc_p2',gddfunc_p2_in, 'read', ncid, readvar=readv)	
+    if ( .not. readv ) call endrun( trim(subname)//' ERROR: error in reading in pft data' )
+    !END PARAMETER ADDITIONS DMR 7/1/11
     call ncd_pio_closefile(ncid)
 
     do i = 0, mxpft
@@ -444,9 +583,9 @@ contains
     npcropmin            = ncorn                ! first prognostic crop
     npcropmax            = nsoybean             ! last prognostic crop in list
 
-    if (use_cndv) then
-       fcur(:) = fcurdv(:)
-    end if
+#if (defined CNDV)
+    fcur(:) = fcurdv(:)
+#endif
 
     !
     ! Do some error checking
