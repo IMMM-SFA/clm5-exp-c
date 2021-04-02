@@ -11,14 +11,13 @@ module subgridMod
   ! !USES:
 #include "shr_assert.h"
   use shr_kind_mod   , only : r8 => shr_kind_r8
-  use shr_log_mod    , only : errMsg => shr_log_errMsg
   use spmdMod        , only : masterproc
   use abortutils     , only : endrun
   use clm_varctl     , only : iulog
   use clm_instur     , only : wt_lunit, wt_nat_patch, urban_valid, wt_cft
   use landunit_varcon, only : istcrop, istdlak, istwet, isturb_tbd, isturb_hd, isturb_md
   use glcBehaviorMod , only : glc_behavior_type
-  use FatesInterfaceMod, only : fates_maxElementsPerSite
+  use FatesInterfaceTypesMod, only : fates_maxElementsPerSite
 
   implicit none
   private   
@@ -39,7 +38,8 @@ module subgridMod
   public :: subgrid_get_info_glacier_mec
   public :: subgrid_get_info_crop
   public :: crop_patch_exists ! returns true if the given crop patch should be created in memory
-
+  public :: lake_landunit_exists ! returns true if the lake landunit should be created in memory
+  
   ! !PRIVATE MEMBER FUNCTIONS:
   private :: subgrid_get_info_urban
 
@@ -55,6 +55,8 @@ contains
     !
     ! !DESCRIPTION:
     ! Obtain gridcell properties, aggregated across all landunits
+    !
+    ! !USES
     !
     ! !ARGUMENTS
     integer , intent(in)  :: gi       ! grid cell index
@@ -74,6 +76,8 @@ contains
     ! atm_topo is arbitrary for the sake of getting these counts. We don't have a true
     ! atm_topo value at the point of this call, so use 0.
     real(r8), parameter :: atm_topo = 0._r8
+
+
     !------------------------------------------------------------------------------
 
     npatches = 0
@@ -83,6 +87,12 @@ contains
 
     call subgrid_get_info_natveg(gi, npatches_temp, ncols_temp, nlunits_temp)
     call accumulate_counters()
+
+    !scs jks HH-FATES
+    ! call this after natveg call because we allocate space for
+    ! FATES cohorts based on the number of naturally vegetated columns
+    ! and nothing else
+    call subgrid_get_info_cohort(gi, ncols_temp, ncohorts)
 
     call subgrid_get_info_urban_tbd(gi, npatches_temp, ncols_temp, nlunits_temp)
     call accumulate_counters()
@@ -106,7 +116,8 @@ contains
     call subgrid_get_info_crop(gi, npatches_temp, ncols_temp, nlunits_temp)
     call accumulate_counters()
    
-    call subgrid_get_info_cohort(gi,ncohorts)
+    !move up for FATES
+!scs jks !call subgrid_get_info_cohort(gi, ncols_temp, ncohorts)
 
   contains
     subroutine accumulate_counters
@@ -130,6 +141,8 @@ contains
     !
     ! !USES
     use clm_varpar, only : natpft_lb, natpft_ub
+    use clm_instur, only : ncol_per_hillslope
+    use clm_varctl, only : use_hillslope
     !
     ! !ARGUMENTS:
     integer, intent(in)  :: gi        ! grid cell index
@@ -152,9 +165,15 @@ contains
     end do
 
     if (npatches > 0) then
-       ! Assume that the vegetated landunit has one column
-       ncols = 1
        nlunits = 1
+       if(use_hillslope) then 
+          ! ensure ncols is > 0
+          ncols = max(ncol_per_hillslope(gi),1)
+       else
+          ncols = 1
+       endif
+       npatches = ncols*npatches
+
     else
        ! As noted in natveg_patch_exists, we expect a naturally vegetated landunit in
        ! every grid cell. This means that npatches should be at least 1 in every grid
@@ -188,8 +207,8 @@ contains
     character(len=*), parameter :: subname = 'natveg_patch_exists'
     !-----------------------------------------------------------------------
 
-    SHR_ASSERT(pft >= natpft_lb, errMsg(sourcefile, __LINE__))
-    SHR_ASSERT(pft <= natpft_ub, errMsg(sourcefile, __LINE__))
+    SHR_ASSERT_FL(pft >= natpft_lb, sourcefile, __LINE__)
+    SHR_ASSERT_FL(pft <= natpft_ub, sourcefile, __LINE__)
 
     if (get_do_transient_pfts() .or. use_cndv .or. use_fates) then
        ! To support transient PFTS and dynamic vegetation cases, we have all possible PFTs
@@ -218,7 +237,7 @@ contains
 
   ! -----------------------------------------------------------------------------
 
-  subroutine subgrid_get_info_cohort(gi, ncohorts)
+  subroutine subgrid_get_info_cohort(gi, ncols, ncohorts)
     !
     ! !DESCRIPTION:
     ! Obtain cohort counts per each gridcell.
@@ -228,6 +247,7 @@ contains
     !
     ! !ARGUMENTS:
     integer, intent(in)  :: gi        ! grid cell index
+    integer, intent(in)  :: ncols     ! number of nat veg columns in this grid cell
     integer, intent(out) :: ncohorts  ! number of cohorts in this grid cell
     !
     ! !LOCAL VARIABLES:
@@ -246,10 +266,9 @@ contains
     ! restart vector will just be a little sparse.
     ! -------------------------------------------------------------------------
     
-    ncohorts = fates_maxElementsPerSite
+    ncohorts = ncols*fates_maxElementsPerSite
     
  end subroutine subgrid_get_info_cohort
-
 
   !-----------------------------------------------------------------------
   subroutine subgrid_get_info_urban_tbd(gi, npatches, ncols, nlunits)
@@ -393,10 +412,10 @@ contains
     character(len=*), parameter :: subname = 'subgrid_get_info_lake'
     !-----------------------------------------------------------------------
 
-    ! We currently do NOT allow the lake landunit to expand via dynamic landunits, so we
-    ! only need to allocate space for it where its weight is currently non-zero.
-
-    if (wt_lunit(gi, istdlak) > 0.0_r8) then
+    ! We do allow the lake landunit to expand via dynamic landunits, so we
+    !  need to allocate space for where it is known that the lake unit will grow.
+    
+    if (lake_landunit_exists(gi) ) then
        npatches = 1
        ncols = 1
        nlunits = 1
@@ -485,7 +504,6 @@ contains
     !-----------------------------------------------------------------------
 
     npatches = 0
-
     do cft = cft_lb, cft_ub
        if (crop_patch_exists(gi, cft)) then
           npatches = npatches + 1
@@ -529,8 +547,8 @@ contains
     !-----------------------------------------------------------------------
 
     if (create_crop_landunit) then
-       SHR_ASSERT(cft >= cft_lb, errMsg(sourcefile, __LINE__))
-       SHR_ASSERT(cft <= cft_ub, errMsg(sourcefile, __LINE__))
+       SHR_ASSERT_FL(cft >= cft_lb, sourcefile, __LINE__)
+       SHR_ASSERT_FL(cft <= cft_ub, sourcefile, __LINE__)
 
        if (get_do_transient_crops()) then
           ! To support dynamic landunits, we have all possible crop columns in every grid
@@ -559,6 +577,45 @@ contains
 
   end function crop_patch_exists
 
+!-----------------------------------------------------------------------
+  function lake_landunit_exists(gi) result(exists)
+    !
+    ! !DESCRIPTION:
+    ! Returns true if a land unit for lakes should be created in memory
+    ! which is defined for gridcells which will grow lake, given by haslake
+    ! 
+    ! !USES:
+    use dynSubgridControlMod , only : get_do_transient_lakes
+    use clm_instur           , only : haslake
+    !
+    ! !ARGUMENTS:
+    logical :: exists  ! function result
+    integer, intent(in) :: gi  ! grid cell index
+    !
+    ! !LOCAL VARIABLES:
 
+    character(len=*), parameter :: subname = 'lake_landunit_exists'
+    !-----------------------------------------------------------------------
+
+    if (get_do_transient_lakes()) then
+       ! To support dynamic landunits, we initialise a lake land unit in each grid cell in which there are lakes. 
+       ! This is defined by the haslake variable
+       
+       if (haslake(gi)) then
+            exists = .true.
+       else
+            exists = .false.
+       end if
+        
+    else 
+        ! For a run without transient lakes, only allocate memory for lakes actually present in run)
+        if (wt_lunit(gi, istdlak) > 0.0_r8) then
+            exists = .true.
+        else
+            exists = .false.
+        end if
+    end if
+
+  end function lake_landunit_exists
 
 end module subgridMod
